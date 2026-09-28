@@ -1809,7 +1809,7 @@ class PortfolioManager:
             return "precious_metals"
 
         # Indices group
-        if any(x in asset for x in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW", "USTEC"]):
+        if any(x in asset for x in ["SPX", "SPY", "QQQ", "NASDAQ", "DOW", "USTEC", "JP225", "NIKKEI"]):
             return "indices"
 
         # Forex group

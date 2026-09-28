@@ -673,17 +673,17 @@
       "leverage": 100,
       "strategies": {
         "mean_reversion": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.4,
           "min_confidence": 0.45
         },
         "trend_following": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.6,
           "min_confidence": 0.45
         },
         "exponential_moving_averages": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.4,
           "min_confidence": 0.45
         }
@@ -756,17 +756,17 @@
       "leverage": 100,
       "strategies": {
         "mean_reversion": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.6,
           "min_confidence": 0.45
         },
         "trend_following": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.4,
           "min_confidence": 0.45
         },
         "exponential_moving_averages": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.4,
           "min_confidence": 0.45
         }
@@ -842,17 +842,17 @@
       "leverage": 100,
       "strategies": {
         "mean_reversion": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.5,
           "min_confidence": 0.45
         },
         "trend_following": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.5,
           "min_confidence": 0.45
         },
         "exponential_moving_averages": {
-          "enabled": true,
+          "enabled": false,
           "weight": 0.4,
           "min_confidence": 0.45
         }

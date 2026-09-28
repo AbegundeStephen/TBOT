@@ -120,9 +120,13 @@ for _asset in enabled_assets:
 # asset OUTSIDE that documented universe is live. Checking the real config
 # turned this up for real: GBPUSD and USDJPY are currently enabled, and
 # neither is part of the documented/tested asset scope.
-_DOCUMENTED_ASSETS = {"BTC", "GOLD", "EURUSD", "EURJPY", "USTEC"}
+# B12: scope grew beyond CLAUDE.md's original five (GBPAUD/USOIL predate B12;
+# JP225/SILVER/AUDJPY are B12's new markets, EURJPY was turned on live by B12).
+# AUDJPY is included here even though it's paper-only (ns_paper_markets) --
+# "enabled" in config just means the engine runs for it, not that it trades live.
+_DOCUMENTED_ASSETS = {"BTC", "GOLD", "EURUSD", "EURJPY", "USTEC", "USOIL", "GBPAUD", "JP225", "SILVER", "AUDJPY"}
 _undocumented_enabled = [a for a in enabled_assets if a not in _DOCUMENTED_ASSETS]
-check("no undocumented assets enabled (CLAUDE.md scope: BTC/GOLD/EURUSD/EURJPY/USTEC)",
+check("no undocumented assets enabled (scope: BTC/GOLD/EURUSD/EURJPY/USTEC/USOIL/GBPAUD/JP225/SILVER/AUDJPY)",
       not _undocumented_enabled, f"unexpected enabled: {_undocumented_enabled}")
 
 # risk_management sanity

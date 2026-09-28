@@ -14,6 +14,9 @@ class HealthMonitor:
             "GBPAUD": 1.1, "BTC": 5.3,
             "EURUSD": 5.3, "USTEC": 5.3, "GOLD": 6.0,
             "USOIL": 6.7,
+            # B12 new/newly-live markets -- not yet measured, mirrored off the
+            # closest existing asset until real cadence data comes in
+            "EURJPY": 5.3, "JP225": 5.3, "SILVER": 6.0, "AUDJPY": 1.1,
         }
 
     def heartbeat(self):
