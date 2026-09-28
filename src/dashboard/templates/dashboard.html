@@ -1053,7 +1053,7 @@
     <div style="font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">
         📡 MTF Regime
     </div>
-    <div class="regime-strip" id="regime-strip" style="grid-template-columns: repeat(7, 1fr);">
+    <div class="regime-strip" id="regime-strip" style="grid-template-columns: repeat(10, 1fr);">
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">BTC</div><div class="regime-label" id="reg-btc">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">GOLD</div><div class="regime-label" id="reg-gold">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">EURUSD</div><div class="regime-label" id="reg-eurusd">Loading…</div></div></div>
@@ -1061,6 +1061,9 @@
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">USOIL</div><div class="regime-label" id="reg-usoil">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">GBPAUD</div><div class="regime-label" id="reg-gbpaud">Loading…</div></div></div>
         <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">EURJPY</div><div class="regime-label" id="reg-eurjpy">Loading…</div></div></div>
+        <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">JP225</div><div class="regime-label" id="reg-jp225">Loading…</div></div></div>
+        <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">SILVER</div><div class="regime-label" id="reg-silver">Loading…</div></div></div>
+        <div class="regime-card"><div class="regime-dot" style="background:var(--muted)"></div><div><div class="regime-asset">AUDJPY</div><div class="regime-label" id="reg-audjpy">Loading…</div></div></div>
     </div>
 
     <!-- ── Charts ───────────────────────────── -->
@@ -1631,7 +1634,7 @@ async function loadPerformance() {
 // REGIMES
 // ────────────────────────────────────────────────────────────
 async function loadRegimes() {
-    const assets = ['BTC','GOLD','EURUSD','USTEC','USOIL','GBPAUD','EURJPY'];
+    const assets = ['BTC','GOLD','EURUSD','USTEC','USOIL','GBPAUD','EURJPY','JP225','SILVER','AUDJPY'];
     await Promise.allSettled(assets.map(a => loadRegime(a)));
 }
 
