@@ -16,7 +16,8 @@ TEST 4   GEAR TEST (gear_sim rebuilt): a break on a 1H close against the tested 
 TEST 5   SECOND LOOKS: BTC's pause-then-turn entry + runner; the runner exit on GOLD and USTEC -- by halves.
 TEST 6   NEW MARKETS, SAME RULES: silver, US30, ETH, USDJPY, EURJPY -- fetched from MT5 (15 months), 3 profiles each.
 PAPER    every run (and --weekly): ideas 2 to 6 measured on candles the rules have never seen.
-WEEKLY   --weekly : the forward test + proof supply + council outliers (Saturday's run).
+WEEKLY   --weekly : the forward test, the paper ideas, proof supply, and (B12) the council's vote, the A+ / watch
+         labels and the exploration lanes, from the diary (Saturday's run).
 All tests run on the research engine already verified on this box (tools/realistic_test.py, fingerprint checked).
 Run:  python tools/all_tests.py            (everything)
       python tools/all_tests.py --weekly   (Saturday)
@@ -483,12 +484,10 @@ def weekly_supply(days=7):
         print("   retired because: " + "; ".join("%s x%d" % (k, v) for k, v in sorted(skip_why.items(), key=lambda x: -x[1])))
 
 
-def weekly_council(days=28):
-    print("\n" + "=" * 110)
-    print("WEEKLY -- COUNCIL OUTLIERS: does the council's score predict the result? (diary, last %d days)" % days)
-    print("=" * 110)
+def _diary_rows(days):
+    """Closed trades from the diary (logs/episodes), last `days` days: (row, R) -- R None when the row has none."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
-    rows, seen_keys = [], None
+    out = []
     for f in sorted(glob.glob(os.path.join("logs", "episodes", "episodes_*.jsonl"))):
         for line in open(f, encoding="utf-8", errors="replace"):
             try:
@@ -496,33 +495,84 @@ def weekly_council(days=28):
             except Exception:
                 continue
             ct = r.get("close_time") or r.get("exit_time") or r.get("closed_at")
+            if not ct:
+                continue
             try:
                 t = pd.Timestamp(ct)
-                t = t.tz_localize("UTC") if t.tzinfo is None else t
+                t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
             except Exception:
                 continue
             if t < since:
                 continue
-            seen_keys = seen_keys or sorted(r.keys())
-            sc = next((r.get(k) for k in ("council_score", "final_score", "aggregator_score", "score", "confidence")
+            rv = next((r.get(k) for k in ("net_pnl_r", "pnl_r", "r_multiple", "gross_r")
                        if isinstance(r.get(k), (int, float))), None)
-            rv = next((r.get(k) for k in ("net_pnl_r", "pnl_r", "r_multiple", "gross_r") if isinstance(r.get(k), (int, float))), None)
-            if sc is not None and rv is not None:
-                rows.append((str(r.get("asset")), str(r.get("source")), float(sc), float(rv)))
-    if not rows:
-        print("   no rows with both a council score and an R -- the diary's field names (tell Claude):")
-        print("   " + (", ".join(seen_keys) if seen_keys else "no diary rows in the period"))
+            out.append((r, None if rv is None else float(rv)))
+    return out
+
+
+def _line(lab, v):
+    if not v:
+        return "   %-44s%6d" % (lab, 0)
+    return "   %-44s%6d%+10.2f%8.0f%%" % (lab, len(v), sum(v) / len(v), 100.0 * sum(1 for x in v if x > 0) / len(v))
+
+
+def weekly_council(days=28):
+    print("\n" + "=" * 110)
+    print("WEEKLY -- COUNCIL ADVISORY (B12): live trades the council PASSED against those it refused (HOLD), last %d days" % days)
+    print("=" * 110)
+    rows = [(r, rv) for r, rv in _diary_rows(days) if str(r.get("source", "live")) == "live" and rv is not None
+            and not r.get("external") and not r.get("adopted")]
+    got = [((r.get("council_vote") or ("HOLD" if r.get("trial_only") else None)), rv) for r, rv in rows]
+    got = [(v, rv) for v, rv in got if v in ("PASS", "HOLD")]
+    if not got:
+        keys = sorted(rows[0][0].keys()) if rows else []
+        print("   no live trades with a council vote yet (B12 not live, or no trades yet)")
+        if keys:
+            print("   diary fields seen (tell Claude if 'council_vote' / 'trial_only' are missing): " + ", ".join(keys))
         return
-    d = pd.DataFrame(rows, columns=["asset", "source", "score", "R"])
-    d["band"] = pd.qcut(d["score"].rank(method="first"), q=min(4, len(d)), labels=False)
-    print("   score quarter (0 = lowest)   trades   mean R   win %")
-    for q, g in d.groupby("band"):
-        print("   %20s%10d%+9.2f%8.0f%%" % (int(q), len(g), g.R.mean(), 100.0 * (g.R > 0).mean()))
-    top = d.sort_values("score").tail(3)
-    bot = d.sort_values("score").head(3)
-    print("   highest-scored: " + "; ".join("%s %.2f -> %+.2fR" % (r.asset, r.score, r.R) for r in top.itertuples()))
-    print("   lowest-scored:  " + "; ".join("%s %.2f -> %+.2fR" % (r.asset, r.score, r.R) for r in bot.itertuples()))
-    print("   if the top quarter does no better than the bottom quarter, the council's score is not adding anything yet.")
+    print("   %-44s%6s%10s%9s" % ("", "trades", "R a trade", "win"))
+    for v, lab in (("PASS", "council said PASS"), ("HOLD", "council said HOLD (traded, smallest size)")):
+        print(_line(lab, [rv for vv, rv in got if vv == v]))
+    print("   the HOLD trades switch advisory off by themselves at -10R. If HOLD does as well as PASS over 20+ trades,")
+    print("   the council's vote is not adding anything -- your call at the 4-week review.")
+
+
+def weekly_labels(days=120):
+    print("\n" + "=" * 110)
+    print("WEEKLY -- LABELS (B12, tracking only): A+ proofs and the watch groups, live trades, last %d days" % days)
+    print("=" * 110)
+    rows = [(r, rv) for r, rv in _diary_rows(days) if str(r.get("source", "live")) == "live" and rv is not None
+            and isinstance(r.get("ns_labels"), dict)]
+    if not rows:
+        print("   no labelled live trades yet (B12 not live, or no trades yet)")
+        return
+    ap = lambda r: list((r.get("ns_labels") or {}).get("aplus") or [])
+    wt = lambda r: list((r.get("ns_labels") or {}).get("watch") or [])
+    print("   %-44s%6s%10s%9s" % ("", "trades", "R a trade", "win"))
+    print(_line("A+ (any)", [rv for r, rv in rows if ap(r)]))
+    print(_line("not A+", [rv for r, rv in rows if not ap(r)]))
+    for lab in ("4H brain level", "open 1H FVG"):
+        print(_line("A+: " + lab, [rv for r, rv in rows if lab in ap(r)]))
+    for lab, mk in (("GOLD short", "GOLD"), ("BTC non-spike", "BTC")):
+        print(_line("watch: " + lab, [rv for r, rv in rows if lab in wt(r)]))
+        print(_line("   the rest of " + mk, [rv for r, rv in rows if str(r.get("asset", "")).upper() == mk and lab not in wt(r)]))
+    print("   AGREED (28 Sep): 30+ A+ trades still ahead by 0.2R+ -> a sizing test is proposed; 20+ trades in a watch")
+    print("   group still losing -> a skip rule is proposed. Nothing changes without your ruling.")
+
+
+def weekly_explore(days=120):
+    print("\n" + "=" * 110)
+    print("WEEKLY -- EXPLORATION ON PAPER (B12): practice-lane trades of the ideas set aside, last %d days" % days)
+    print("=" * 110)
+    rows = [(r, rv) for r, rv in _diary_rows(days) if rv is not None and
+            str(r.get("gate_id") or r.get("gate_blocked_by") or "").startswith("explore")]
+    if not rows:
+        print("   no finished exploration trades yet (B12 not live, or none closed yet)")
+        return
+    print("   %-44s%6s%10s%9s" % ("", "trades", "R a trade", "win"))
+    for g in ("explore_1h_break", "explore_all_proofs", "explore_bounce"):
+        print(_line(g, [rv for r, rv in rows if str(r.get("gate_id") or r.get("gate_blocked_by") or "").startswith(g)]))
+    print("   each idea graduates to a proper test only after 20+ finished trades that stay positive after costs.")
 
 
 # ============================================================================================================
@@ -896,7 +946,21 @@ def test5(ns, bt):
 NEW_MKTS = {"SILVER": ("XAGUSDm", 0.0035), "US30": ("US30m", 0.0025), "ETH": ("ETHUSDm", 0.006),
             "USDJPY": ("USDJPYm", 0.0012), "EURJPY": ("EURJPYm", 0.0012)}
 PROFILES = [("E", "SIMPLE", "today's entry + 2.5-move target"), ("B", "SIMPLE4", "break entry + 4-move target"),
-            ("E", "RUNNER", "today's entry + runner")]
+            ("E", "RUNNER", "today's entry + runner"), ("E", "SIMPLE+F", "EURUSD/GBPAUD profile (filtered)")]
+STOP_FLOOR = {"metal": 0.0035, "energy": 0.0055, "index": 0.0025, "crypto": 0.006, "fx": 0.0012}
+
+
+def _market_class(sym):
+    s = sym.upper()
+    if s[:3] in ("XAU", "XAG", "XPT", "XPD"):
+        return "metal"
+    if s.startswith(("USOIL", "UKOIL", "XNG", "XBR", "XTI")):
+        return "energy"
+    if s.startswith(("BTC", "ETH", "XRP", "SOL", "LTC", "ADA", "BNB", "DOGE")):
+        return "crypto"
+    if s.startswith(("US30", "US500", "USTEC", "DE30", "DE40", "GER", "UK100", "JP225", "AUS200", "FR40", "STOXX", "HK50", "US2000")):
+        return "index"
+    return "fx"
 
 
 def _fetch(sym):
@@ -911,10 +975,16 @@ def _fetch(sym):
             if info is None:
                 return "not offered by the broker", None
             mt5.symbol_select(sym, True)
-            tick = mt5.symbol_info_tick(sym)
-            px = float(tick.bid) if tick is not None and tick.bid else None
-            if px:
-                spread = float(info.spread) * float(info.point) / px
+            import time as _t
+            for _try in range(5):                      # the price can be empty for a moment after selecting
+                info = mt5.symbol_info(sym) or info
+                tick = mt5.symbol_info_tick(sym)
+                bid = float(getattr(tick, "bid", 0) or getattr(info, "bid", 0) or 0)
+                ask = float(getattr(tick, "ask", 0) or getattr(info, "ask", 0) or 0)
+                if bid > 0:
+                    spread = ((ask - bid) / bid) if ask > bid else float(info.spread) * float(info.point) / bid
+                    break
+                _t.sleep(0.5)
             if not (os.path.exists(p1) and os.path.exists(p4)):
                 for tf, path, min_bars in ((mt5.TIMEFRAME_H1, p1, 3000), (mt5.TIMEFRAME_H4, p4, 700)):
                     r = mt5.copy_rates_range(sym, tf, datetime(2025, 6, 1), datetime.now())
@@ -936,10 +1006,11 @@ def _fetch(sym):
 
 def test6(ns):
     print("\n" + "=" * 110)
-    print("TEST 6 -- NEW MARKETS, SAME RULES (idea 1): %s" % ", ".join(NEW_MKTS))
+    print("TEST 6 -- NEW MARKETS, SAME RULES: %s" % ", ".join(NEW_MKTS))
     print("          the three tested profiles, no filters, one position at a time, after the spread the broker quotes now.")
     print("          AGREED IN ADVANCE: a market qualifies for a live trial at the smallest size if one profile makes over")
-    print("          +0.10R a trade in BOTH halves with 30+ trades in each half. 5 markets x 3 profiles = 15 tries, so a")
+    print("          +0.10R a trade in BOTH halves with 30+ trades in each half. %d markets x %d profiles = %d tries, so a"
+          % (len(NEW_MKTS), len(PROFILES), len(NEW_MKTS) * len(PROFILES)))
     print("          pass is a candidate, not proof -- the live trial is the proof.")
     print("=" * 110)
     weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
@@ -967,7 +1038,14 @@ def test6(ns):
             continue
         print("   %-8s %-9s (%s; spread %s)" % (a, sym, status, ("%.4f%%" % (100 * sp)) if sp else "median of our markets"))
         for e, m, lab in PROFILES:
-            s = _stat(_pick(rows, a, e, m), split, weeks) if len(rows) else (0, float("nan"), float("nan"), float("nan"), 0.0, 0, 0)
+            if not len(rows):
+                s = (0, float("nan"), float("nan"), float("nan"), 0.0, 0, 0)
+            elif m == "SIMPLE+F":
+                g = rows[(rows.asset == a) & (rows.entry == e) & (rows["mode"] == "SIMPLE") &
+                         (rows.kind == "continuation") & ~(rows.strength > SPIKE)]
+                s = _stat(one_at_a_time(g), split, weeks)
+            else:
+                s = _stat(_pick(rows, a, e, m), split, weeks)
             ok = s[5] >= 30 and s[6] >= 30 and s[2] > 0.10 and s[3] > 0.10
             if ok:
                 qualified.append((a, lab))
@@ -1076,7 +1154,23 @@ def variants_forward(ns, fdf):
 
 
 # ============================================================================================================
+def markets_only(arg):
+    """python tools/all_tests.py --markets GBPJPYm,AUDJPYm,... : only the new-market test, for the listed symbols."""
+    global ns_start_bt, ns_end_bt
+    NEW_MKTS.clear()
+    for sym in [x.strip() for x in arg.split(",") if x.strip()]:
+        name = sym[:-1].upper() if sym.endswith("m") else sym.upper()
+        NEW_MKTS[name] = (sym, STOP_FLOOR[_market_class(sym)])
+    print("NEW-MARKET TEST -- %s -- %d market(s) -- read-only" % (datetime.now().strftime("%d %b %Y %H:%M"), len(NEW_MKTS)))
+    ns = research_ns()
+    ns_start_bt, ns_end_bt = ns["START"], ns["END"]
+    test6(ns)
+
+
 def main():
+    if "--markets" in sys.argv:
+        i = sys.argv.index("--markets")
+        return markets_only(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
     weekly = "--weekly" in sys.argv
     print("ALL TESTS -- %s -- %s -- read-only, nothing here changes the bot"
           % (datetime.now().strftime("%d %b %Y %H:%M"), "WEEKLY run (forward test + supply + council)" if weekly else "full research run"))
@@ -1106,7 +1200,7 @@ def main():
     except Exception as ex:
         print("PAPER IDEAS FAILED: %s: %s" % (type(ex).__name__, ex))
     if weekly:
-        for fn in (weekly_supply, weekly_council):
+        for fn in (weekly_supply, weekly_council, weekly_labels, weekly_explore):
             try:
                 fn()
             except Exception as ex:
