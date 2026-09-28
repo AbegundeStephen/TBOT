@@ -13,6 +13,9 @@ TEST 3   FLIP TEST (the second record): every signal and its mirror, with what w
 TEST 3b  YOUR VERSION: the opposite strategy, the losers' record (hindsight flip against what the opposite really
          paid) and the loss fingerprint.
 TEST 4   GEAR TEST (gear_sim rebuilt): a break on a 1H close against the tested 4H close.
+TEST 5   SECOND LOOKS: BTC's pause-then-turn entry + runner; the runner exit on GOLD and USTEC -- by halves.
+TEST 6   NEW MARKETS, SAME RULES: silver, US30, ETH, USDJPY, EURJPY -- fetched from MT5 (15 months), 3 profiles each.
+PAPER    every run (and --weekly): ideas 2 to 6 measured on candles the rules have never seen.
 WEEKLY   --weekly : the forward test + proof supply + council outliers (Saturday's run).
 All tests run on the research engine already verified on this box (tools/realistic_test.py, fingerprint checked).
 Run:  python tools/all_tests.py            (everything)
@@ -851,6 +854,228 @@ def write_gallery(ns, path=os.path.join("data", "research", "level_gallery.html"
 
 
 # ============================================================================================================
+# TEST 5 -- second looks: BTC's pause-then-turn entry; the runner exit on GOLD and USTEC (idea 2 and idea 5)
+# ============================================================================================================
+T5 = [("BTC", ("E", "RUNNER"), ("E2", "RUNNER"), "BTC: pause-then-turn entry + runner (idea 2)"),
+      ("GOLD", ("B", "SIMPLE4"), ("B", "RUNNER"), "GOLD: runner exit instead of the 4-move target (idea 5)"),
+      ("USTEC", ("B", "SIMPLE4"), ("B", "RUNNER"), "USTEC: runner exit on the break entry (idea 5)"),
+      ("USTEC", ("B", "SIMPLE4"), ("E", "RUNNER"), "USTEC: today's entry + runner (idea 5)")]
+
+
+def _stat(g, split, weeks):
+    a_, b_ = g[g["t"] < split]["net"], g[g["t"] >= split]["net"]
+    return (len(g), g.net.mean() if len(g) else float("nan"), a_.mean() if len(a_) else float("nan"),
+            b_.mean() if len(b_) else float("nan"), g.net.sum() / weeks, len(a_), len(b_))
+
+
+def _pick(df, a, e, m):
+    return one_at_a_time(df[(df.asset == a) & (df.entry == e) & (df["mode"] == m)])
+
+
+def test5(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 5 -- SECOND LOOKS (ideas 2 and 5): each candidate against today's setting in that market, one position at")
+    print("          a time, after costs. AGREED IN ADVANCE: a candidate replaces today's only if it beats it in BOTH")
+    print("          halves AND makes more R a week there.")
+    print("=" * 110)
+    weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
+    split = ns["SPLIT"]
+    print("   %-58s%8s%11s%18s%10s" % ("", "trades", "R a trade", "(1st / 2nd)", "R a week"))
+    for a, cur, cand, lab in T5:
+        s0, s1 = _stat(_pick(bt, a, *cur), split, weeks), _stat(_pick(bt, a, *cand), split, weeks)
+        ok = s1[2] > s0[2] and s1[3] > s0[3] and s1[4] > s0[4]
+        print("   %s" % lab)
+        for nm, s in (("today: %s + %s" % (cur[0], cur[1].lower()), s0), ("candidate: %s + %s" % (cand[0], cand[1].lower()), s1)):
+            print("     %-56s%8d%+11.2f%18s%+10.2f" % (nm, s[0], s[1], "(%+.2f / %+.2f)" % (s[2], s[3]), s[4]))
+        print("     -> %s" % ("PASSES -- a candidate for your ruling (forward test first)" if ok else "today's setting stays"))
+
+
+# ============================================================================================================
+# TEST 6 -- new markets, same rules (idea 1): fetch 15 months of candles from MT5, then the three tested profiles
+# ============================================================================================================
+NEW_MKTS = {"SILVER": ("XAGUSDm", 0.0035), "US30": ("US30m", 0.0025), "ETH": ("ETHUSDm", 0.006),
+            "USDJPY": ("USDJPYm", 0.0012), "EURJPY": ("EURJPYm", 0.0012)}
+PROFILES = [("E", "SIMPLE", "today's entry + 2.5-move target"), ("B", "SIMPLE4", "break entry + 4-move target"),
+            ("E", "RUNNER", "today's entry + runner")]
+
+
+def _fetch(sym):
+    """Price files for a market the bot does not trade: written once to data/raw, never overwriting anything.
+    Returns (status, spread as a fraction of price or None)."""
+    p1, p4 = os.path.join("data", "raw", "%s_1h.csv" % sym), os.path.join("data", "raw", "%s_4h.csv" % sym)
+    spread = None
+    try:
+        import MetaTrader5 as mt5
+        if mt5.initialize():
+            info = mt5.symbol_info(sym)
+            if info is None:
+                return "not offered by the broker", None
+            mt5.symbol_select(sym, True)
+            tick = mt5.symbol_info_tick(sym)
+            px = float(tick.bid) if tick is not None and tick.bid else None
+            if px:
+                spread = float(info.spread) * float(info.point) / px
+            if not (os.path.exists(p1) and os.path.exists(p4)):
+                for tf, path, min_bars in ((mt5.TIMEFRAME_H1, p1, 3000), (mt5.TIMEFRAME_H4, p4, 700)):
+                    r = mt5.copy_rates_range(sym, tf, datetime(2025, 6, 1), datetime.now())
+                    if r is None or len(r) < min_bars:
+                        return "not enough history at the broker (%s bars)" % (0 if r is None else len(r)), None
+                    d = pd.DataFrame(r)
+                    d["time"] = pd.to_datetime(d["time"], unit="s")
+                    d = d.rename(columns={"tick_volume": "volume"})[["time", "open", "high", "low", "close", "volume"]]
+                    d.to_csv(path, index=False)
+                return "fetched from MT5", spread
+    except ImportError:
+        pass
+    except Exception as ex:
+        return "MT5 error: %s" % ex, None
+    if os.path.exists(p1) and os.path.exists(p4):
+        return "on file", spread
+    return "no MT5 connection and no price file", None
+
+
+def test6(ns):
+    print("\n" + "=" * 110)
+    print("TEST 6 -- NEW MARKETS, SAME RULES (idea 1): %s" % ", ".join(NEW_MKTS))
+    print("          the three tested profiles, no filters, one position at a time, after the spread the broker quotes now.")
+    print("          AGREED IN ADVANCE: a market qualifies for a live trial at the smallest size if one profile makes over")
+    print("          +0.10R a trade in BOTH halves with 30+ trades in each half. 5 markets x 3 profiles = 15 tries, so a")
+    print("          pass is a candidate, not proof -- the live trial is the proof.")
+    print("=" * 110)
+    weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
+    split = ns["SPLIT"]
+    known_costs = [v for v in ns["COST"].values() if v == v]
+    base_cost = float(np.median(known_costs)) if known_costs else 0.0002
+    live_tpl = dict(next(iter(ns["LIVE"].values()))) if ns.get("LIVE") else {}
+    qualified = []
+    for a, (sym, slp) in NEW_MKTS.items():
+        status, sp = _fetch(sym)
+        if status not in ("fetched from MT5", "on file"):
+            print("   %-8s %-9s skipped: %s" % (a, sym, status))
+            continue
+        ns["SYM"][a] = sym
+        ns["MIN_RR"][a] = 0.5
+        ns["MIN_SL_PCT"][a] = slp
+        if live_tpl:
+            ns["LIVE"][a] = dict(live_tpl)
+        for h in range(24):
+            ns["COST"][(a, h)] = sp if sp else base_cost
+        try:
+            rows = pd.DataFrame(ns["run_market"](a))
+        except Exception as ex:
+            print("   %-8s %-9s failed: %s: %s" % (a, sym, type(ex).__name__, ex))
+            continue
+        print("   %-8s %-9s (%s; spread %s)" % (a, sym, status, ("%.4f%%" % (100 * sp)) if sp else "median of our markets"))
+        for e, m, lab in PROFILES:
+            s = _stat(_pick(rows, a, e, m), split, weeks) if len(rows) else (0, float("nan"), float("nan"), float("nan"), 0.0, 0, 0)
+            ok = s[5] >= 30 and s[6] >= 30 and s[2] > 0.10 and s[3] > 0.10
+            if ok:
+                qualified.append((a, lab))
+            print("     %-36s%7d tr%+9.2f R%18s%+9.2f R/wk   %s" % (lab, s[0], s[1], "(%+.2f / %+.2f)" % (s[2], s[3]), s[4],
+                                                               "QUALIFIES" if ok else ""))
+    print("   qualified: " + (", ".join("%s (%s)" % q for q in qualified) if qualified else "none"))
+
+
+# ============================================================================================================
+# WEEKLY -- the paper ideas on candles they have never seen (ideas 2 to 6)
+# ============================================================================================================
+VARIANTS = [("BTC pause-then-turn + runner (idea 2)", ("BTC", "E2", "RUNNER")),
+            ("GOLD runner exit (idea 5)", ("GOLD", "B", "RUNNER")),
+            ("USTEC runner exit (idea 5)", ("USTEC", "B", "RUNNER")),
+            ("EURUSD every proof -- reversals and spikes back in (idea 4)", ("EURUSD", "E", "SIMPLE")),
+            ("GBPAUD every proof -- reversals and spikes back in (idea 4)", ("GBPAUD", "E", "SIMPLE"))]
+POCKETS = [("USTEC", "open FVG (4H)"), ("USTEC", "4H brain level"), ("GOLD", "1H brain level"), ("GOLD", "EMA 20 (1H)")]
+
+
+def _scan_bounces(ns, start, pockets):
+    """The Test 1c bounce, only for the chosen market / level pockets, on candles after `start`."""
+    rows = []
+    for a in sorted({p[0] for p in pockets}):
+        M = _market(ns, a)
+        c1, hi1, lo1, a1, t1 = M["c1"], M["hi1"], M["lo1"], M["a1"], M["t1"]
+        want = {typ for (mk, typ) in pockets if mk == a}
+        last_lvl, free = {}, {}
+        for i in range(210, len(c1) - 1):
+            if t1[i] <= start:
+                continue
+            atr = a1[i]
+            if not (atr == atr and atr > 0):
+                continue
+            tol = 0.25 * atr
+            for want_low in (True, False):
+                d = 1 if want_low else -1
+                for (typ, l, h) in _levels_at(M, i, want_low):
+                    if typ not in want:
+                        continue
+                    if free.get(typ) is not None and t1[i] < free[typ]:
+                        continue
+                    if want_low:
+                        ok = c1[i - 1] > h and lo1[i] <= h + tol and c1[i] > h and lo1[i] >= l - 2 * atr
+                    else:
+                        ok = c1[i - 1] < l and hi1[i] >= l - tol and c1[i] < l and hi1[i] <= h + 2 * atr
+                    if not ok:
+                        continue
+                    key = (typ, d, round(l, 6), round(h, 6))
+                    if key in last_lvl and (t1[i] - last_lvl[key]) < pd.Timedelta(hours=24):
+                        continue
+                    last_lvl[key] = t1[i]
+                    e = float(c1[i])
+                    stop = float(lo1[i] - 0.3 * atr) if d == 1 else float(hi1[i] + 0.3 * atr)
+                    floor = ns["MIN_SL_PCT"].get(a, 0.0) * e
+                    if abs(e - stop) < floor:
+                        stop = e - d * floor
+                    if abs(e - stop) > 5 * atr:
+                        stop = e - d * 5 * atr
+                    risk = abs(e - stop)
+                    if risk <= 0 or 2.5 * atr / risk < ns["MIN_RR"].get(a, 0.5):
+                        continue
+                    R, why, jx = ns["exit_run"](a, "SIMPLE", d, e, stop, i, t1, hi1, lo1, c1, a1,
+                                               M["pl"] if d == 1 else M["ph"], float(atr))
+                    cost = ns["COST"][(a, t1[i].hour)] * e / risk
+                    open_ = jx >= len(c1) - 1 and (t1[jx] - t1[i]) < pd.Timedelta(days=7)
+                    rows.append(dict(asset=a, type=typ, t=t1[i], net=R - cost, open=open_))
+                    free[typ] = t1[jx]
+    return pd.DataFrame(rows)
+
+
+def variants_forward(ns, fdf):
+    print("\n" + "=" * 110)
+    print("PAPER IDEAS ON NEW CANDLES (ideas 2 to 6) -- same forward window as Test 2; measured, never traded")
+    print("=" * 110)
+    print("   %-60s%10s%8s%12s" % ("idea", "finished", "open", "R a trade"))
+
+    def show(lab, g):
+        g_done = g[~g["open"]] if len(g) and "open" in g else g
+        print("   %-60s%10d%8d%12s" % (lab[:59], len(g_done), (len(g) - len(g_done)),
+                                     ("%+.2f" % g_done.net.mean()) if len(g_done) else "-"))
+    lc = {}
+    for a in MIX:
+        h1 = ns["load"](ns["SYM"][a], "1h")
+        lc[a] = h1.index[-1] + pd.Timedelta(hours=1)
+
+    def _mark_open(g):
+        if not len(g):
+            return g.assign(open=[])
+        return g.assign(open=[(r.exit_t >= lc.get(r.asset, r.exit_t)) and (r.exit_t - r.t < pd.Timedelta(days=7))
+                              for r in g.itertuples()])
+    for lab, (a, e, m) in VARIANTS:
+        g = one_at_a_time(fdf[(fdf.asset == a) & (fdf.entry == e) & (fdf["mode"] == m)]) if len(fdf) else fdf
+        show(lab, _mark_open(g) if len(g) else pd.DataFrame(columns=["net", "open"]))
+    try:
+        ns1 = research_ns(variant="1H")
+        f1 = run_window(ns1, FREEZE + pd.Timedelta(minutes=1), pd.Timestamp("2100-01-01"))
+        g = one_at_a_time(mix_rows(f1)) if len(f1) else f1
+        show("1H break, every market (idea 3)", _mark_open(g) if len(g) else pd.DataFrame(columns=["net", "open"]))
+    except Exception as ex:
+        print("   1H break (idea 3): skipped -- %s" % ex)
+    b = _scan_bounces(ns, FREEZE, POCKETS)
+    for (a, typ) in POCKETS:
+        g = b[(b.asset == a) & (b.type == typ)] if len(b) else pd.DataFrame(columns=["net", "open"])
+        show("%s bounce off %s (idea 6)" % (a, typ), g)
+    print("   each idea graduates to a proper test only after 20+ finished forward trades that stay positive.")
+
+
+# ============================================================================================================
 def main():
     weekly = "--weekly" in sys.argv
     print("ALL TESTS -- %s -- %s -- read-only, nothing here changes the bot"
@@ -876,6 +1101,10 @@ def main():
     except Exception as ex:
         print("TEST 2 FAILED: %s: %s" % (type(ex).__name__, ex))
     ns["START"], ns["END"] = ns_start_bt, ns_end_bt
+    try:
+        variants_forward(ns, fdf if fdf is not None else pd.DataFrame())
+    except Exception as ex:
+        print("PAPER IDEAS FAILED: %s: %s" % (type(ex).__name__, ex))
     if weekly:
         for fn in (weekly_supply, weekly_council):
             try:
@@ -896,6 +1125,14 @@ def main():
         test4(ns, bt)
     except Exception as ex:
         print("TEST 4 FAILED: %s: %s" % (type(ex).__name__, ex))
+    try:
+        test5(ns, bt)
+    except Exception as ex:
+        print("TEST 5 FAILED: %s: %s" % (type(ex).__name__, ex))
+    try:
+        test6(ns)
+    except Exception as ex:
+        print("TEST 6 FAILED: %s: %s" % (type(ex).__name__, ex))
     try:
         p = write_gallery(ns)
         print("\nGALLERY -- example charts to go through: %s (%d charts)" % (p, min(80, len(GALLERY))) if p else "\nGALLERY -- nothing to draw")
