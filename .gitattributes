@@ -1,0 +1,8 @@
+# Python files here are frequently pasted from research docs and verified
+# against a SHA256 fingerprint before running on the box (see tools/all_tests.py,
+# src/execution/ns_engine.py). Windows Git's core.autocrlf=true default silently
+# rewrites LF -> CRLF on checkout, which changes the file's byte content and
+# breaks that fingerprint check even though nothing was actually tampered with.
+# Forcing LF here means a checkout's hash always matches the fingerprint a doc
+# gives, on any machine, regardless of that machine's core.autocrlf setting.
+*.py text eol=lf
