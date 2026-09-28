@@ -310,6 +310,12 @@ class MT5ExecutionHandler:
                     "GBPAUDm": 1.9200,
                     "USOIL": 75.00,
                     "USOILm": 75.00,
+                    "JP225": 40000.00,
+                    "JP225m": 40000.00,
+                    "XAGUSD": 30.00,
+                    "XAGUSDm": 30.00,
+                    "AUDJPY": 95.00,
+                    "AUDJPYm": 95.00,
                 }
                 # Handle suffixes like 'm'
                 base_symbol = symbol.replace("m", "")

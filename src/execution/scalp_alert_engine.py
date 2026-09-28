@@ -103,6 +103,10 @@ _ASSET_CURRENCIES = {
     "GBPUSD": {"GBP", "USD"},
     "USDJPY": {"USD", "JPY"},
     "USOIL": {"USD", "OIL"}, "USOILM": {"USD", "OIL"},
+    # B12 new markets
+    "JP225": {"JPY"}, "JP225M": {"JPY"},
+    "SILVER": {"USD"}, "XAGUSD": {"USD"}, "XAGUSDM": {"USD"},
+    "AUDJPY": {"AUD", "JPY"},
 }
 
 
