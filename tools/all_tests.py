@@ -20,6 +20,7 @@ WEEKLY   --weekly : the forward test, the paper ideas, proof supply, and (B12) t
          labels and the exploration lanes, from the diary (Saturday's run).
 All tests run on the research engine already verified on this box (tools/realistic_test.py, fingerprint checked).
 TEST 7   --research7 : reversals at levels, broken levels as proof lines, candle shapes and colours, UKOIL vs USOIL.
+TEST 8   --research8 : levels round two -- R2 on a footprint, the hybrid proof line, other levels at a reversal's turn.
 Run:  python tools/all_tests.py            (everything)
       python tools/all_tests.py --weekly   (Saturday)
 """
@@ -1501,6 +1502,195 @@ def research7():
 
 
 
+
+# ============================================================================================================
+# TEST 8 -- levels, round two (Desire 28 Sep, decision 29 B): footprints as CONFIRMATION, chased three ways
+#   8a the line a break crosses (R2) sits on a brain level | 8b hybrid proof line: a 1H brain level as R2, the real
+#   4H swing as R1 | 8c other levels at a reversal's turning point: old 4H swing zones, yesterday's high/low, round
+#   numbers
+# ============================================================================================================
+_BRAIN1_CACHE = {}
+
+
+def _brain_events_1h(asset, h1):
+    """Every level the 1H brain set (typed H = resistance, L = support), as (conf, typ, lvl, edge)."""
+    if asset in _BRAIN1_CACHE:
+        return _BRAIN1_CACHE[asset]
+    m4, m1, lsm = _brain_states(asset, h1)
+    ev = []
+    if m1 is not None:
+        atr = lsm.atr14(h1)
+        last = {}
+        for t, c, a in zip(h1.index, h1["close"].values, atr.values):
+            try:
+                s = m1.update(float(c), float(a))
+            except Exception:
+                continue
+            up = s.state in UP
+            for key, typ, v in (("up", "H", s.anchor_main_up_max if up else None),
+                                ("down", "L", None if up else s.anchor_main_down_min),
+                                ("nhigh", "H", s.anchor_natural_high), ("nlow", "L", s.anchor_natural_low)):
+                if v is not None and v == v and last.get(key) != v:
+                    ev.append((t + pd.Timedelta(hours=1), typ, float(v), float(v)))
+                    last[key] = v
+    ev.sort(key=lambda x: x[0])
+    _BRAIN1_CACHE[asset] = ev
+    return ev
+
+
+def test8a(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 8a -- THE LINE THAT BREAKS (R2) ON A FOOTPRINT: does a break do better when R2 sits on a brain level known")
+    print("           before the setup (within half a typical move)? Reversals and continuations shown separately.")
+    print("           AGREED IN ADVANCE: better by 0.2R+ in BOTH halves, 20+ trades on each side -> a live label first.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    rec = []
+    for r in mix_rows(bt).itertuples():
+        M = _market(ns, r.asset)
+        ic = int(M["t1"].searchsorted(pd.Timestamp(r.conf), side="left"))
+        if ic < 2 or ic >= len(M["c1"]):
+            continue
+        atr = M["a1"][ic]
+        if not (atr == atr and atr > 0):
+            continue
+        lv = _levels_at(M, ic, int(r.d) != 1)
+        near = {typ: any(l - 0.5 * atr <= float(r.R2) <= h + 0.5 * atr for (tt, l, h) in lv if tt == typ)
+                for typ in ("1H brain level", "4H brain level")}
+        rec.append((str(r.kind), pd.Timestamp(r.t), float(r.net), near))
+    print("   %-13s%-16s%18s%20s   %s" % ("kind", "footprint at R2", "on it: n / R", "not on it: n / R", "(1st / 2nd) on vs not -> verdict"))
+    for kind in ("reversal", "continuation", "all"):
+        for typ in ("1H brain level", "4H brain level"):
+            on = [(t, x) for k, t, x, nr in rec if (kind == "all" or k == kind) and nr[typ]]
+            no = [(t, x) for k, t, x, nr in rec if (kind == "all" or k == kind) and not nr[typ]]
+            A, N = _halves(on, split), _halves(no, split)
+            ok = A[4] >= 20 and A[5] >= 20 and N[4] >= 20 and N[5] >= 20 and A[2] - N[2] >= 0.2 and A[3] - N[3] >= 0.2
+            print("   %-13s%-16s%18s%20s   (%+.2f / %+.2f) vs (%+.2f / %+.2f)%s" % (
+                kind, typ, "%d / %+.2f" % (A[0], A[1]), "%d / %+.2f" % (N[0], N[1]), A[2], A[3], N[2], N[3],
+                "  -> CONFIRMS" if ok else ""))
+
+
+def test8b(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 8b -- HYBRID PROOF LINE: R2 = a 1H brain level (a resistance for longs, a support for shorts), broken on a")
+    print("           4H close; R1 = the REAL last 4H swing (low for longs, high for shorts). Same retest, trigger, exits,")
+    print("           filters and one position per market as today. 'Extra' = trades that do not coincide with a tested")
+    print("           trade (same market and direction, entry within 4 hours).")
+    print("           AGREED IN ADVANCE: a PAPER lane if over +0.10R in BOTH halves with 30+ in each half, AND the extra")
+    print("           trades are positive in both halves.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    weeks = max(1.0, (ns_end_bt - ns_start_bt).total_seconds() / 86400 / 7)
+    base = one_at_a_time(mix_rows(bt))
+    try:
+        nsa = research_ns(variant="ALT")
+    except Exception as ex:
+        print("   skipped: %s" % ex)
+        return
+    sw = nsa["swings"]
+    parts = []
+    for d, own, other in ((1, "H", "L"), (-1, "L", "H")):
+        # longs: R2 candidates = 1H brain resistances (H), R1 = real 4H swing lows (L); shorts the mirror
+        nsa["SWING_SRC"] = (lambda a, h4, h1, own=own, other=other: sorted(
+            [e for e in _brain_events_1h(a, h1) if e[1] == own] + [e for e in sw(h4) if e[1] == other],
+            key=lambda x: x[0]))
+        rows = run_window(nsa, ns["START"], ns["END"])
+        if len(rows):
+            parts.append(rows[rows.d == d])
+    ns["START"], ns["END"] = ns_start_bt, ns_end_bt
+    if not parts or not sum(len(p) for p in parts):
+        print("   no trades")
+        return
+    alt = one_at_a_time(mix_rows(pd.concat(parts)))
+    st, b_st = _stat(alt, split, weeks), _stat(base, split, weeks)
+    extra = []
+    for r in alt.itertuples():
+        b = base[(base.asset == r.asset) & (base.d == r.d)]
+        if not (len(b) and (abs(b["t"] - r.t) <= pd.Timedelta(hours=4)).any()):
+            extra.append((pd.Timestamp(r.t), float(r.net)))
+    E = _halves(extra, split)
+    ok = st[5] >= 30 and st[6] >= 30 and st[2] > 0.10 and st[3] > 0.10 and E[2] > 0 and E[3] > 0
+    print("   %-30s%8s%11s%18s%10s%8s%16s" % ("proof lines from", "trades", "R a trade", "(1st / 2nd)", "R a week", "extra", "extra R (1/2)"))
+    print("   %-30s%8d%+11.2f%18s%+10.2f" % ("4H swing closes (today)", b_st[0], b_st[1], "(%+.2f / %+.2f)" % (b_st[2], b_st[3]), b_st[4]))
+    print("   %-30s%8d%+11.2f%18s%+10.2f%8d%16s   %s" % ("1H brain level + real 4H swing", st[0], st[1], "(%+.2f / %+.2f)" % (st[2], st[3]),
+                                                       st[4], E[0], "(%+.2f / %+.2f)" % (E[2], E[3]), "-> PAPER LANE" if ok else ""))
+    for a in MIX:
+        g = alt[alt.asset == a]
+        if len(g):
+            s = _stat(g, split, weeks)
+            print("     %-8s%8d%+11.2f%18s%+10.2f" % (a, s[0], s[1], "(%+.2f / %+.2f)" % (s[2], s[3]), s[4]))
+
+
+def _round_step(p):
+    return 0.005 if p < 10 else 5 * 10 ** (int(np.floor(np.log10(p))) - 2)
+
+
+def test8c(ns, bt):
+    print("\n" + "=" * 110)
+    print("TEST 8c -- OTHER LEVELS AT A REVERSAL'S TURNING POINT (R1): (i) an older 4H swing zone on the same side, (ii)")
+    print("           yesterday's high or low, (iii) a round number (GOLD every 50, BTC/USTEC every 500, USOIL every 0.5, FX")
+    print("           every 0.0050). 'At' = within half a typical move. Continuations shown as a check.")
+    print("           AGREED IN ADVANCE: a level CONFIRMS reversals if reversals at it beat the rest by 0.2R+ in BOTH halves,")
+    print("           20+ trades on each side -> a live label first, not a rule.")
+    print("=" * 110)
+    split = ns["SPLIT"]
+    days = {}
+    rec = []
+    for r in mix_rows(bt).itertuples():
+        M = _market(ns, r.asset)
+        ic = int(M["t1"].searchsorted(pd.Timestamp(r.conf), side="left"))
+        if ic < 2 or ic >= len(M["c1"]):
+            continue
+        atr = float(M["a1"][ic])
+        if not (atr == atr and atr > 0):
+            continue
+        r1, d, conf = float(r.R1), int(r.d), pd.Timestamp(r.conf)
+        side = "L" if d == 1 else "H"
+        z = any(zc < np.datetime64(conf) and np.datetime64(conf) - zc <= np.timedelta64(30, "D") and ztyp == side
+                and zl - 0.5 * atr <= r1 <= zh + 0.5 * atr for zc, zl, zh, ztyp in M["zones"])
+        if r.asset not in days:
+            h1 = M["h1"]
+            g = h1.groupby(h1.index.normalize())
+            days[r.asset] = (g["high"].max(), g["low"].min())
+        dh, dl = days[r.asset]
+        prev = conf.normalize() - pd.Timedelta(days=1)
+        k = dh.index.searchsorted(prev, side="right") - 1
+        y = (k >= 0) and (abs(r1 - float(dh.iloc[k])) <= 0.5 * atr or abs(r1 - float(dl.iloc[k])) <= 0.5 * atr)
+        stp = _round_step(r1)
+        rn = abs(r1 - round(r1 / stp) * stp) <= 0.5 * atr
+        rec.append((str(r.kind), pd.Timestamp(r.t), float(r.net), {"older 4H swing zone": z, "yesterday's high/low": bool(y), "round number": rn}))
+    print("   %-13s%-22s%18s%20s   %s" % ("kind", "level at R1", "at it: n / R", "not at it: n / R", "(1st / 2nd) at vs not -> verdict"))
+    for kind in ("reversal", "continuation"):
+        for typ in ("older 4H swing zone", "yesterday's high/low", "round number"):
+            at = [(t, x) for k, t, x, f in rec if k == kind and f[typ]]
+            no = [(t, x) for k, t, x, f in rec if k == kind and not f[typ]]
+            A, N = _halves(at, split), _halves(no, split)
+            ok = (kind == "reversal" and A[4] >= 20 and A[5] >= 20 and N[4] >= 20 and N[5] >= 20
+                  and A[2] - N[2] >= 0.2 and A[3] - N[3] >= 0.2)
+            print("   %-13s%-22s%18s%20s   (%+.2f / %+.2f) vs (%+.2f / %+.2f)%s" % (
+                kind, typ, "%d / %+.2f" % (A[0], A[1]), "%d / %+.2f" % (N[0], N[1]), A[2], A[3], N[2], N[3],
+                "  -> CONFIRMS" if ok else ""))
+    print("   (with 7a: 1H brain levels already confirm reversals -- this checks whether other levels do too)")
+
+
+def research8():
+    """python tools/all_tests.py --research8 : tests 8a-8c only."""
+    global ns_start_bt, ns_end_bt
+    print("TEST 8 -- %s -- read-only" % datetime.now().strftime("%d %b %Y %H:%M"))
+    ns = research_ns()
+    globals()["_OWN_SYMS"] = list(ns["SYM"].values())
+    ns_start_bt, ns_end_bt = ns["START"], ns["END"]
+    print("   (building the tested backtest record ...)")
+    bt = run_window(ns, ns_start_bt, ns_end_bt)
+    for fn in (test8a, test8b, test8c):
+        try:
+            fn(ns, bt)
+        except Exception as ex:
+            print("%s FAILED: %s: %s" % (fn.__name__, type(ex).__name__, ex))
+    print("\nDone. Measured on the backtest window -- anything that passes goes to a label or paper first, then the forward test.")
+
+
+
 def markets_only(arg):
     """python tools/all_tests.py --markets GBPJPYm,AUDJPYm,... : only the new-market test, for the listed symbols."""
     global ns_start_bt, ns_end_bt
@@ -1517,6 +1707,8 @@ def markets_only(arg):
 def main():
     if "--research7" in sys.argv:
         return research7()
+    if "--research8" in sys.argv:
+        return research8()
     if "--markets" in sys.argv:
         i = sys.argv.index("--markets")
         return markets_only(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
