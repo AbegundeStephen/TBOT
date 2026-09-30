@@ -5176,7 +5176,8 @@ class InstitutionalCouncilAggregator:
                 )
                 return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
-            features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+            features_mr = (self.s_mean_reversion.generate_features(df.tail(100))
+                           if self.s_mean_reversion is not None else pd.DataFrame())
             if features_mr.empty:
                 return 0.0, 0.0, {"buy": "MOM: No data", "sell": "MOM: No data"}
 
@@ -5409,7 +5410,8 @@ class InstitutionalCouncilAggregator:
                 else:
                     sell += 0.45 * weight * _adx_scale; sell_parts.append(f"adx({_adx_scale:.2f})")
 
-        features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+        features_mr = (self.s_mean_reversion.generate_features(df.tail(100))
+                       if self.s_mean_reversion is not None else pd.DataFrame())
         rsi = float(features_mr.iloc[-1].get("rsi", 50)) if not features_mr.empty else 50.0
 
         # ── Segment 2: RSI zone confirmation (0.25) ───────────────────
@@ -5569,7 +5571,8 @@ class InstitutionalCouncilAggregator:
                     sell_exp += " -divergence(exhaustion)"
                 return buy_score, sell_score, {"buy": buy_exp, "sell": sell_exp}
 
-            features_mr = self.s_mean_reversion.generate_features(df.tail(100))
+            features_mr = (self.s_mean_reversion.generate_features(df.tail(100))
+                           if self.s_mean_reversion is not None else pd.DataFrame())
             if features_mr.empty:
                 return 0.0, 0.0, {"buy": "MOM: No data", "sell": "MOM: No data"}
 
