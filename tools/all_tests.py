@@ -45,6 +45,121 @@ SPIKE = 0.85
 UP = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
 
 
+def _live_rules():
+    """B12.1 (Desire 30 Sep, decisions 48/49/50/54): each market's live break rules, read from config exactly where the
+    engine reads them (phase_config.ns_markets.<ASSET>), so Saturday's forward test runs the rules the bot trades."""
+    try:
+        pc = json.load(open(os.path.join("config", "config.json"), encoding="utf-8-sig")).get("phase_config", {}) or {}
+        nm = pc.get("ns_markets") or {}
+    except Exception as e:
+        print("   (live rules could not be read from config: %s -- the old rules are used)" % e)
+        nm = {}
+    out = {}
+    for a, v in nm.items():
+        v = v or {}
+        out[a] = dict(quality_lines=bool(v.get("quality_lines", False)), break_rule=str(v.get("break_rule", "any") or "any"),
+                      big_break_atr=float(v.get("big_break_atr", 0.25) or 0.25), reversal_rule=str(v.get("reversal_rule", "none") or "none"),
+                      room_required=bool(v.get("room_required", False)), room_atr=float(v.get("room_atr", 1.0) or 1.0))
+    return out
+
+
+def _rule_hooks(ns, RULES):
+    """B12.1: the three hooks the research engine calls -- a setup may live (_QUAL), a 4H/1H close counts as the break
+    (_BRK), there is room at the entry (_ROOM) -- the same code every rule test used (Tests A/B, 48, 50, 54)."""
+    D_, PEND = {}, {}
+    def data(asset):
+        if asset not in D_:
+            M = _market(ns, asset)
+            L = ns["swings"](M["h4"])
+            g = M["h1"].groupby(M["h1"].index.normalize())
+            D_[asset] = dict(M=M, swt=np.array([np.datetime64(pd.Timestamp(c)) for c, _, _, _ in L], dtype="datetime64[ns]"),
+                             swy=np.array([ty for _, ty, _, _ in L]), swl=np.array([lv for _, _, lv, _ in L], dtype=float),
+                             dh=g["high"].max(), dl=g["low"].min())
+        return D_[asset]
+    def brain4(M, T):
+        ts, vs = M["b4"]; tp = np.datetime64(pd.Timestamp(T))
+        return vs[ts.searchsorted(tp - np.timedelta64(30, "D"), side="left"):ts.searchsorted(tp, side="left")].astype(float)
+    def a1_at(M, T):
+        k = int(M["t1"].searchsorted(pd.Timestamp(T), side="left"))
+        return float(M["a1"][k]) if 2 <= k < len(M["c1"]) else float("nan")
+    def _QUAL(asset, conf, d, R2, R1, kind):
+        r = RULES.get(asset) or {}
+        if not r.get("quality_lines") and r.get("reversal_rule", "none") == "none":
+            return True
+        D = data(asset); M = D["M"]; a1 = a1_at(M, conf)
+        if not (a1 == a1 and a1 > 0):
+            return False
+        band, tp = 0.5 * a1, np.datetime64(pd.Timestamp(conf))
+        b4 = brain4(M, conf)
+        if r.get("quality_lines"):
+            m = (D["swt"] < tp) & (D["swt"] >= tp - np.timedelta64(30, "D")) & (D["swy"] == ("L" if d == -1 else "H"))
+            near = np.abs(D["swl"][m] - R2)
+            held = bool(((near <= band) & (near > 1e-9 * max(1.0, abs(R2)))).any())
+            if not (held or bool((np.abs(b4 - R2) <= band).any())):
+                return False
+        rule = r.get("reversal_rule", "none")
+        if kind != "reversal" or rule == "none":
+            return True
+        c1 = bool((np.abs(b4 - R1) <= band).any())
+        if rule == "brain4":
+            return c1
+        ty = "L" if d == 1 else "H"
+        mm = (D["swt"] < tp) & (D["swt"] >= tp - np.timedelta64(30, "D")) & (D["swy"] == ty)
+        c2 = bool((np.abs(D["swl"][mm] - R1) <= band).any())
+        k = D["dh"].index.searchsorted(pd.Timestamp(conf).normalize() - pd.Timedelta(days=1), side="right") - 1
+        c3 = k >= 0 and abs(float((D["dl"] if d == 1 else D["dh"]).iloc[k]) - R1) <= band
+        return (int(c1) + int(c2) + int(c3)) >= 2
+    def _BRK(asset, key, d, r4, R2, EDGE, c):
+        r = RULES.get(asset) or {}
+        mode = r.get("break_rule", "any")
+        k = (asset,) + key
+        p = PEND.get(k)
+        if p is not None and r4 is None:
+            if mode != "big_or_1h_hold":
+                return False
+            PEND.pop(k, None)
+            return d * (c - R2) > 0
+        if r4 is None:
+            return False
+        c4, a = r4
+        if mode == "any":
+            return d * (c4 - R2) > 0
+        if p is not None and mode == "big_or_confirmed":
+            PEND.pop(k, None)
+            if d * (c4 - p) > 0:
+                return True
+        elif p is not None:
+            PEND.pop(k, None)
+        if a == a and a > 0 and d * (c4 - R2) >= r.get("big_break_atr", 0.25) * a:
+            return True
+        if d * (c4 - R2) > 0:
+            PEND[k] = c4
+        return False
+    def _ROOM(asset, t, d, e, R2, kind=None):
+        r = RULES.get(asset) or {}
+        if not r.get("room_required"):
+            return True
+        D = data(asset); M = D["M"]
+        k4 = int(M["t4"].searchsorted(pd.Timestamp(t), side="right")) - 1
+        a4 = float(M["h4"]["atr"].iloc[k4]) if k4 >= 0 else float("nan")
+        if not (a4 == a4 and a4 > 0):
+            return True
+        W = r.get("room_atr", 1.0)
+        lo, hi = (e - W * a4, e) if d == -1 else (e, e + W * a4)
+        inside = lambda x: (lo <= x < hi) if d == -1 else (lo < x <= hi)
+        if any(inside(float(v)) for v in brain4(M, t)):
+            return False
+        ae = a1_at(M, t); be = 0.5 * ae if ae == ae and ae > 0 else 0.0
+        tp = np.datetime64(pd.Timestamp(t))
+        m = (D["swt"] < tp) & (D["swt"] >= tp - np.timedelta64(30, "D")) & (D["swy"] == ("L" if d == -1 else "H"))
+        lv = D["swl"][m]
+        if any(inside(x) and (np.abs(lv - x) <= be).sum() >= 2 for x in lv):
+            return False
+        k = D["dh"].index.searchsorted(pd.Timestamp(t).normalize() - pd.Timedelta(days=1), side="right") - 1
+        return not (k >= 0 and inside(float((D["dl"] if d == -1 else D["dh"]).iloc[k])))
+    return _QUAL, _BRK, _ROOM
+
+
 def research_ns(variant=None):
     raw = open(RESEARCH, "rb").read()
     got = hashlib.sha256(raw).hexdigest().upper()
@@ -68,7 +183,21 @@ def research_ns(variant=None):
         if src.count(line) != 1:
             raise RuntimeError("research engine layout not recognised -- test 7b is skipped")
         src = src.replace(line, "    for conf, typ, lvl, edge in SWING_SRC(asset, h4, h1):")
+    RULES = _live_rules() if variant is None else {}
+    if any(r["quality_lines"] or r["break_rule"] != "any" or r["reversal_rule"] != "none" or r["room_required"] for r in RULES.values()):
+        # B12.1 (decisions 48/49/50/54): the live break rules, through the same three hooks every rule test used
+        for a_, b_ in (("if r4 is not None and ((d == 1 and r4[0] > R2) or (d == -1 and r4[0] < R2)):",
+                        "if _BRK(asset, (conf, d, R2), d, r4, R2, EDGE, float(c1[i])):"),
+                       ("        got, stage, H2, iB, iR, paused = {}, 0, None, None, None, False\n",
+                        "        if not _QUAL(asset, conf, d, R2, R1, kind):\n            continue\n        got, stage, H2, iB, iR, paused = {}, 0, None, None, None, False\n"),
+                       ("        for style, (i, e, stop, atr) in got.items():\n",
+                        "        for style, (i, e, stop, atr) in got.items():\n            if not _ROOM(asset, t1[i], d, e, R2, kind):\n                continue\n")):
+            if src.count(a_) != 1:
+                raise RuntimeError("research engine layout not recognised -- the live rules cannot be applied")
+            src = src.replace(a_, b_)
     ns = {"__name__": "research"}
+    if RULES:
+        ns["_QUAL"], ns["_BRK"], ns["_ROOM"] = _rule_hooks(ns, RULES)
     exec(compile(src, "research", "exec"), ns)
     return ns
 

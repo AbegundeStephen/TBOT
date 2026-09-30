@@ -144,7 +144,7 @@ class CompositeStateBuilder:
             "_brc_break_ts", "_brc_break_ts_mr",
             "_retest_memory", "_structure_levels", "_zone_levels",
             "_prev_compression", "_traj_last_processed_ts",
-            "_livermore_last_1h_ts", "_brc_log_ts",
+            "_livermore_last_1h_ts", "_brc_log_ts", "_livermore_4h", "_livermore_1h", "_livermore_last_4h_ts",
             "_squeeze_was_active", "_spread_history",
             "_ref_h_anchor", "_ref_state_last", "_ref_dead_pending", "_retest_failed_pending",
             "_ppl", "_atr4_cache", "_gear_cache", "_struct4h", "_ns_state", "_ns_x_state",
@@ -342,6 +342,9 @@ class CompositeStateBuilder:
                     setattr(self, k, _payload[k]); _n += 1
             logger.info("[PERSIST] %s: restored %d stores (bars passed=%d, saved %.0fh ago)",
                         self.asset_type, _n, _bars_passed, _age_h)
+            # B12.1 (Desire 30 Sep, 57 B): the brain is saved with the other stores now -- when it comes back
+            # from disk it must first replay every candle it missed while the bot was down (next cycle).
+            self._lsm_catchup = _payload.get("_livermore_4h") is not None
             # B8-1: the candles closed since the save are replayed on this
             # builder's first proof-engine run (see _b8_catchup).
             self._b8_catchup_from = _saved_last_bar_ts if (_bars_passed or 0) > 0 else None
@@ -352,6 +355,37 @@ class CompositeStateBuilder:
             logger.warning("[PERSIST] %s: pending restore apply failed: %s", self.asset_type, _e)
 
     # ── PHASE 1: Livermore warm-start ────────────────────────────────────────
+
+    def _livermore_catch_up(self, df_4h, df, atr_fn):
+        """B12.1 (Desire 30 Sep, decision 57 B): the brain survives restarts -- its machines are saved with the other
+        stores. After a restore, replay every CLOSED candle it missed while the bot was down, 4H and 1H, in order,
+        so it is exactly where it would be had the bot never stopped. Says so in the log either way."""
+        done = {}
+        for name, frame, m, last_attr in (("4H", df_4h, self._livermore_4h, "_livermore_last_4h_ts"),
+                                          ("1H", df, self._livermore_1h, "_livermore_last_1h_ts")):
+            done[name] = 0
+            if m is None or frame is None or len(frame) < 20:
+                continue
+            idx = frame["timestamp"] if (name == "1H" and "timestamp" in frame.columns) else frame.index
+            idx = pd.DatetimeIndex(idx)
+            last = getattr(self, last_attr, None)
+            if last is None:
+                continue
+            last = pd.Timestamp(last)
+            if len(idx) and last < idx[0]:
+                logger.warning("[Livermore] %s %s: restored brain is older than the candles on hand (%s < %s) -- "
+                               "it continues from the first candle available", self.asset_type, name, last, idx[0])
+            atr = atr_fn(frame).values
+            closes = frame["close"].values
+            for k in range(len(idx)):
+                if idx[k] <= last:
+                    continue
+                a = float(atr[k]) if atr[k] == atr[k] else 0.0
+                m.update(float(closes[k]), a)
+                setattr(self, last_attr, frame["timestamp"].iloc[k] if (name == "1H" and "timestamp" in frame.columns) else frame.index[k])
+                done[name] += 1
+        logger.info("[Livermore] %s: restored brain caught up %d 4H and %d 1H candles missed while the bot was down",
+                    self.asset_type, done.get("4H", 0), done.get("1H", 0))
 
     def warm_start_livermore(
         self, df_4h: "pd.DataFrame", df_1h: "pd.DataFrame"
@@ -881,6 +915,9 @@ class CompositeStateBuilder:
         if self._livermore_4h is not None:
             try:
                 from src.execution.livermore_state_machine import atr14 as _atr14_lsm
+                if getattr(self, "_lsm_catchup", False):       # B12.1 (57 B): a restored brain catches up first
+                    self._lsm_catchup = False
+                    self._livermore_catch_up(df_4h, df, _atr14_lsm)
 
                 # ── 4H update ────────────────────────────────────────────────
                 if df_4h is not None and len(df_4h) >= 15:

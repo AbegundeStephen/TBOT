@@ -157,14 +157,18 @@ class LivermoreStateMachine:
         role_flipped_at / flip_count fields.
         """
         try:
-            if self._nl_confirmed is not None and close < (self._nl_confirmed - mn):
+            # B12.1 (Desire 29 Sep, decision 41 A): never release the level the CURRENT state's break rule is
+            # about to test -- releasing it first meant a decisive break was never counted (brains stuck for weeks).
+            if (self._nl_confirmed is not None and close < (self._nl_confirmed - mn)
+                    and self._state != "NATURAL_RETRACEMENT"):
                 logger.info(
                     "[LSM-RETIRE] %s %s natural_low %.5g released "
                     "(close %.5g is more than one minor unit below it)",
                     self.asset, self.timeframe, self._nl_confirmed, close,
                 )
                 self._nl_confirmed = None
-            if self._nh_confirmed is not None and close > (self._nh_confirmed + mn):
+            if (self._nh_confirmed is not None and close > (self._nh_confirmed + mn)
+                    and self._state != "NATURAL_REBOUND"):
                 logger.info(
                     "[LSM-RETIRE] %s %s natural_high %.5g released "
                     "(close %.5g is more than one minor unit above it)",

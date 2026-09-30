@@ -3152,6 +3152,20 @@ class TradingTelegramBot:
         except Exception as _e:
             logger.warning(f"[NS-CHART] sending the page failed: {_e}")
 
+    async def send_photo_file(self, path, caption=""):
+        """B12.1 (decision 45): send a picture (the white proof card) to the bot's chat."""
+        try:
+            _chat = (getattr(self, "chat_id", None) or getattr(self, "admin_chat_id", None)
+                     or getattr(self, "default_chat_id", None)
+                     or (sorted(self.admin_ids)[0] if getattr(self, "admin_ids", None) else None))
+            if not _chat:
+                logger.warning("[NS-CARD] no chat id found -- card not sent")
+                return
+            with open(path, "rb") as _fh:
+                await self.application.bot.send_photo(chat_id=_chat, photo=_fh, caption=str(caption)[:1000])
+        except Exception as _e:
+            logger.warning(f"[NS-CARD] sending the card failed: {_e}")
+
     async def cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """B11-NS: /resume BTC -- switch a paused market back on (its running total restarts at 0R)."""
         try:
@@ -3177,22 +3191,26 @@ class TradingTelegramBot:
         """
         ✅ FIXED: Chart command that anchors to active loop
         """
-        # B12 (was addendum A7b): the interactive page (open in the browser) -- then the usual picture below
+        # B12.1 (Desire 29 Sep, decision 45): /chart sends the white proof card for every market (or the ones named,
+        # e.g. /chart GOLD BTC) -- and nothing else. The dark picture below is no longer reached.
         try:
             import os as _os_c
             _args = [a.upper() for a in (context.args or [])]
             _all = list(((self.trading_bot.config.get("phase_config", {}) or {}).get("ns_markets", {}) or {}).keys())
+            _missing = []
             for _a in (_args or _all):
-                _p = _os_c.path.join("logs", "charts", "%s.html" % _a)
+                _p = _os_c.path.join("logs", "charts", "%s.png" % _a)
                 if _os_c.path.exists(_p):
                     with open(_p, "rb") as _fh:
-                        await update.message.reply_document(
-                            document=_fh, filename="%s_live_chart.html" % _a,
-                            caption="%s -- interactive chart: open it, then zoom, hover, tap the legend" % _a)
-                elif _args:
-                    await update.message.reply_text("%s: no interactive chart yet (it is written every cycle)" % _a)
+                        await update.message.reply_photo(photo=_fh, caption="%s -- proof card" % _a)
+                else:
+                    _missing.append(_a)
+            if _missing:           # rule 13: say which markets have no card, never skip them silently
+                await update.message.reply_text("No card yet for %s -- drawn when a new candle closes." % ", ".join(_missing))
         except Exception as _ce:
-            logger.warning(f"[NS-CHART] /chart could not send the interactive page: {_ce}")
+            logger.warning(f"[NS-CARD] /chart could not send the cards: {_ce}")
+            await update.message.reply_text("Chart failed: %s" % _ce)
+        return
         try:
             user_id = update.effective_user.id
             if user_id not in self.admin_ids:
@@ -3636,6 +3654,12 @@ class TradingTelegramBot:
                 tp_distance_pct = 0
                 tp_profit_usd = 0
 
+            # B12.1 (Desire 30 Sep, decision 55): the REAL share of the account at risk (dollars / live equity)
+            try:
+                _ns_eq = float(getattr(getattr(self.trading_bot, "portfolio_manager", None), "equity", 0) or 0)
+            except Exception:
+                _ns_eq = 0.0
+            _ns_real = (" = %.1f%% of the account" % (100.0 * sl_risk_usd / _ns_eq)) if (_ns_eq > 0 and sl_risk_usd) else ""
             # Build message
             msg = (
                 f"{side_icon} *Trade Opened: {asset}*\n\n"
@@ -3649,7 +3673,7 @@ class TradingTelegramBot:
             if sl and sl > 0:
                 msg += (
                     f"🛑 Stop Loss: {self._fmt_px(sl)}\n"
-                    f"   └─ Risk: {sl_distance_pct:.2f}% (${sl_risk_usd:.2f})\n"
+                    f"   └─ Risk: ${sl_risk_usd:.2f}{_ns_real} (stop {sl_distance_pct:.2f}% from entry)\n"
                 )
             else:
                 msg += "🛑 Stop Loss: VTM Dynamic\n"

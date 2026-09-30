@@ -7214,6 +7214,22 @@ class TradingBot:
             except Exception as _ns_ce:
                 logger.warning(f"[NS-CHART] {asset_name}: interactive chart not written: {_ns_ce}")
 
+            # B12.1 (Desire 29 Sep, decision 45): the white proof card (logs/charts/<ASSET>.png) -- redrawn when a new
+            # candle has closed or a new proof appeared. Sent with trades and by /chart; shown on the dashboard. Display only.
+            try:
+                from src.ai.ns_card import write_card as _ns_write_card
+                _ns_cs2 = details.get("composite_state") if isinstance(details, dict) else None
+                if _ns_cs2 and df is not None and len(df) > 30:
+                    _ns_last = str(df["timestamp"].iloc[-1]) if "timestamp" in df.columns else str(df.index[-1])
+                    _ns_key = (_ns_last, len(_ns_cs2.get("ns_proofs_hist") or []))
+                    if not hasattr(self, "_b121_card_key"):
+                        self._b121_card_key = {}
+                    if self._b121_card_key.get(asset_name) != _ns_key:
+                        if _ns_write_card(asset_name, df, _ns_cs2):
+                            self._b121_card_key[asset_name] = _ns_key
+            except Exception as _ns_ke:
+                logger.warning(f"[NS-CARD] {asset_name}: card not written: {_ns_ke}")
+
             # Personal scalp-alignment alert (off by default, see
             # config["scalp_alerts"]). Pure observer — never affects signal,
             # sizing, or execution. Moved here (was right after the MTF
@@ -8709,24 +8725,32 @@ class TradingBot:
                                     )
 
                         logger.info(f"[VIZ] Sending chart to Telegram...")
-                        try:   # B12 (was addendum A6): the interactive page with every decision picture
-                            import os as _os_dc
-                            _nsc_p = _os_dc.path.join("logs", "charts", "%s.html" % asset_name)
-                            if _os_dc.path.exists(_nsc_p) and getattr(self.telegram_bot, "send_document_file", None):
-                                self._send_telegram_notification(self.telegram_bot.send_document_file(
-                                    _nsc_p, "%s -- interactive chart at this decision: open it, zoom, hover the triangles" % asset_name))
+                        # B12.1 (Desire 29 Sep, decision 45): the white proof card replaces the dark decision chart and
+                        # the interactive file in the trade message -- drawn fresh for this decision from the real candles.
+                        try:
+                            from src.ai.ns_card import write_card as _ns_card_w
+                            # B12.1 (decision 55): the REAL risk of the position just opened -- from MT5 itself
+                            _ns_risk = None
+                            try:
+                                import MetaTrader5 as _mt5r
+                                _ns_sym = (((self.config.get("assets", {}) or {}).get(asset_name, {}) or {}).get("symbol"))
+                                _ns_pos = list(_mt5r.positions_get(symbol=_ns_sym) or []) if _ns_sym else []
+                                _ns_inf, _ns_acc = (_mt5r.symbol_info(_ns_sym) if _ns_sym else None), _mt5r.account_info()
+                                if _ns_pos and _ns_inf and _ns_acc and _ns_pos[-1].sl and _ns_inf.trade_tick_size:
+                                    _p = _ns_pos[-1]
+                                    _usd = abs(_p.price_open - _p.sl) / _ns_inf.trade_tick_size * _ns_inf.trade_tick_value * _p.volume
+                                    _ns_risk = "REAL RISK  $%.2f = %.1f%% of the account (%.2f lots)" % (
+                                        _usd, 100.0 * _usd / max(float(_ns_acc.equity), 1e-9), _p.volume)
+                            except Exception as _nre:
+                                logger.warning(f"[NS-CARD] {asset_name}: real risk not worked out: {_nre}")
+                            _ns_card = _ns_card_w(asset_name, df, details.get("composite_state") if isinstance(details, dict) else None,
+                                                  risk_text=_ns_risk)
+                            if _ns_card and getattr(self.telegram_bot, "send_photo_file", None):
+                                self._send_telegram_notification(self.telegram_bot.send_photo_file(_ns_card, "%s -- proof card" % asset_name))
+                            elif not _ns_card:
+                                logger.warning(f"[NS-CARD] {asset_name}: no card for this trade (see the warning above)")
                         except Exception as _nsc_e:
-                            logger.warning(f"[NS-CHART] decision page not sent: {_nsc_e}")
-                        self._send_telegram_notification(
-                            self.chart_sender.send_decision_chart(
-                                asset_name=asset_name,
-                                df_15min=df,
-                                df_4h=df_4h,
-                                signal=signal,
-                                details=details,
-                                current_price=current_price,
-                            )
-                        )
+                            logger.warning(f"[NS-CARD] trade card not sent: {_nsc_e}")
 
                         logger.info(f"[VIZ] ✅ Chart sent successfully")
 

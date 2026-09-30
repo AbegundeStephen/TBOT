@@ -1025,12 +1025,27 @@ def ns_interactive_chart(asset):
 
 @app.route("/charts")
 def ns_interactive_charts_index():
-    """B12 (was B11 addendum A8): one link per market."""
+    """B12.1 (decision 45): every market's white proof card; the zoomable page is linked under each."""
     d = os.path.join(project_root, "logs", "charts")
-    names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".html")) if os.path.isdir(d) else []
-    links = "".join('<li style="margin:8px 0"><a href="/chart/%s">%s</a></li>' % (n, n) for n in names) or "<li>no charts yet</li>"
-    return ("<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><title>Live charts</title>"
-            "</head><body style='font-family:sans-serif'><h2>Live charts</h2><ul>%s</ul></body></html>" % links)
+    names = sorted(f[:-4] for f in os.listdir(d) if f.endswith(".png") and not f.endswith(".tmp.png")) if os.path.isdir(d) else []
+    cards = "".join('<div style="margin:18px 0"><h3 style="margin:4px 0">%s</h3>'
+                    '<img src="/card/%s" style="max-width:100%%;border:1px solid #ddd">'
+                    '<div><a href="/chart/%s">zoomable page</a></div></div>' % (n, n, n) for n in names) or "<p>no cards yet</p>"
+    return ("<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><title>Proof cards</title>"
+            "<meta http-equiv='refresh' content='300'></head><body style='font-family:sans-serif;background:#fff'>"
+            "<h2>Proof cards</h2>%s</body></html>" % cards)
+
+
+@app.route("/card/<asset>")
+def ns_card_image(asset):
+    """B12.1 (decision 45): the white proof card picture (the bot redraws it when a new candle closes)."""
+    from flask import send_file
+    p = os.path.join(project_root, "logs", "charts", "%s.png" % str(asset).upper())
+    if not os.path.exists(p):
+        return jsonify({"error": "no card yet for %s" % asset}), 404
+    resp = send_file(p, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/api/chart/<asset>")
