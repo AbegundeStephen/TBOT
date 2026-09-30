@@ -92,6 +92,16 @@ def market_settings(asset, pcfg=None):
     cfg.update(over)
     cfg["min_sl_pct"] = float(cfg.get("min_sl_pct", 0.0) or 0.0)
     cfg["min_rr"] = float(cfg.get("min_rr", 0.5) or 0.5)
+    # B12.1 (Desire 30 Sep, decisions 48 and 50): your break rules. Every default = the old B12 rule.
+    cfg["quality_lines"] = bool(cfg.get("quality_lines", False))      # only lines that held before or are brain-marked
+    cfg["break_rule"] = str(cfg.get("break_rule", "any") or "any")    # "any" | "big_or_1h_hold" (1b) | "big_or_confirmed" (4H)
+    cfg["big_break_atr"] = float(cfg.get("big_break_atr", 0.25) or 0.25)
+    cfg["room_atr"] = float(cfg.get("room_atr", 1.0) or 1.0)
+    cfg["room_required"] = bool(cfg.get("room_required", False))      # decision 48: a tag, unless switched on
+    cfg["reversal_at_4h_brain"] = bool(cfg.get("reversal_at_4h_brain", False))   # decision 50 (kept = reversal_rule "brain4")
+    # B12.1 (Desire 30 Sep, decisions 50 A and 54): which reversals may live -- "none" | "brain4" (the turning point on
+    # a 4H brain level) | "vote2" (BTC: at least 2 of -- 4H brain level / held before / yesterday's low (buy) or high (sell))
+    cfg["reversal_rule"] = str(cfg.get("reversal_rule") or ("brain4" if cfg["reversal_at_4h_brain"] else "none"))
     return cfg
 
 
@@ -276,6 +286,9 @@ class NSEngine:
         hi4, lo4, c4 = (df4[c].astype(float).values for c in ("high", "low", "close"))
         a4 = atr14(hi4, lo4, c4)
         self._lab4 = (t4, hi4, lo4)                  # B12: for the 4H-gap watch label (read-only)
+        self._t4a4 = (t4, a4)                        # B12.1: the 4H move size at an entry (room check)
+        if self.variant is None:
+            self._brain4_step(st, t4, hi4, lo4, c4, self._lab[0][-1] if len(self._lab[0]) else None)  # B12.1 (57 B)
         close4 = dict(zip(t4, c4))
         atr4_at = dict(zip(t4, a4))
         bar4 = {t: (h, l, c) for t, h, l, c in zip(t4, hi4, lo4, c4)}
@@ -403,15 +416,142 @@ class NSEngine:
         a4 = atr4_at.get(conf)
         if a4 is None or not (a4 == a4) or a4 <= 0 or abs(r2 - r1) < MIN_SWING_ATR4 * a4:
             return
+        _cfg = getattr(self, "_main_cfg", None) or {}
+        if self.variant is None and (_cfg.get("quality_lines") or _cfg.get("reversal_rule", "none") != "none"):
+            _why = self._line_check(st, _cfg, d, r2, r1, kind, conf)
+            if _why:
+                if emit:
+                    self._log.info("[SETUP-SKIP] %s: NS %s dir=%+d R2=%.5g R1=%.5g -- %s", self.asset,
+                                   KIND_MAP.get(kind, "TF_CONT"), d, r2, r1, _why)
+                return
         sid = st["next_id"]
         st["next_id"] += 1
         st["setups"].append(dict(id=sid, d=d, r2=r2, edge=edge2, r1=r1, kind=kind, conf=conf, atr4=float(a4),
-                                 stage=0, t_break=None, h2=None, t_touch=None))
+                                 stage=0, t_break=None, h2=None, t_touch=None,
+                                 checks=getattr(self, "_checks", None) if self.variant is None else None))
         if emit:
             self._log.info("[SETUP-BORN] %s: NS %s dir=%+d R2=%.5g (zone to %.5g) R1=%.5g -- waiting for a 4H close past R2",
                         self.asset, KIND_MAP.get(kind, "TF_CONT"), d, r2, edge2, r1)
             self._log.info("[R1-ORIGIN] %s: NS %s dir=%+d H=%.5g R1=%.5g tag=SWING_4H tests=0 gap=%.2fATR4 (%s)",
                         self.asset, KIND_MAP.get(kind, "TF_CONT"), d, r2, r1, abs(r2 - r1) / a4, kind)
+            if st["setups"][-1].get("checks"):
+                self._log.info("[NS-QUALITY] %s: R2=%.5g -- %s", self.asset, r2, st["setups"][-1]["checks"])
+
+    def _brain4_step(self, st, t4, hi4, lo4, c4, t_last1h=None):
+        """B12.1 (Desire 30 Sep, decision 57 B): the engine keeps its OWN 4H brain -- the fixed Livermore machine,
+        fed every closed 4H candle once, saved with the engine's memory (so restarts keep it) -- and records every
+        level it sets, dated by the candle that set it, exactly as the research does (Tests 7a/8a, rules 48/50/54).
+        After a reset it replays all the 4H candles on hand, so there is no blind month. A 4H candle is fed only once
+        the NEXT hourly candle has closed (settled), so a stale candle corrected on the next read (35 A) never
+        reaches the brain -- a level becomes usable one hour later; its date stays the candle that set it."""
+        lsm, piv = _lsm_mod()
+        if lsm is None or not len(t4):
+            return
+        m, last = st.get("brain4_m"), st.get("brain4_t")
+        if m is None:
+            m = lsm.make_livermore_pair(self.asset, piv.get(self.asset, {}))[0]
+            st["brain4_m"], st["brain4_prev"], last = m, {}, None
+            st["brain_hist"] = [x for x in st.get("brain_hist", []) if x[0] != "4H"]
+        fr = pd.DataFrame({"high": np.asarray(hi4, float), "low": np.asarray(lo4, float), "close": np.asarray(c4, float)},
+                          index=pd.DatetimeIndex(t4))
+        atr = lsm.atr14(fr).values
+        prev = st.setdefault("brain4_prev", {})
+        new = 0
+        for k in range(len(t4)):
+            tk = pd.Timestamp(t4[k])
+            if last is not None and tk <= last:
+                continue
+            if t_last1h is not None and tk >= pd.Timestamp(t_last1h):
+                break                                   # not settled yet: the next hourly candle hasn't closed
+            last = tk
+            try:
+                s_ = m.update(float(c4[k]), float(atr[k]))
+            except Exception:
+                continue
+            up = s_.state in UP4
+            for key, v in (("up", s_.anchor_main_up_max if up else None), ("down", None if up else s_.anchor_main_down_min),
+                           ("nlow", s_.anchor_natural_low), ("nhigh", s_.anchor_natural_high)):
+                if v is not None and v == v and prev.get(key) != v:
+                    st.setdefault("brain_hist", []).append(("4H", float(v), tk))
+                    prev[key] = v
+                    new += 1
+        st["brain4_t"] = last
+
+    def _line_check(self, st, cfg, d, r2, r1, kind, conf):
+        """B12.1 (decisions 48 / 50): None if the setup may live, else why not. Only levels known before the setup.
+        Quality line = within half a 1H move of an EARLIER 4H top (buy) / bottom (sell) of the last 30 days, or of a
+        4H brain level seen in the last 30 days. Switch (50): a reversal must turn (R1) at a 4H brain level."""
+        t1, _h, _l, a1 = self._lab
+        self._checks = None
+        conf = pd.Timestamp(conf)
+        ic = int(t1.searchsorted(conf, side="left"))
+        a1c = float(a1[ic]) if 2 <= ic < len(t1) else float("nan")
+        if not (a1c == a1c and a1c > 0):
+            return "no 1H move size at the setup's birth"
+        band = LEVEL_NEAR_ATR * a1c
+        brain = [float(v) for tf_, v, since in st.get("brain_hist", [])
+                 if tf_ == "4H" and pd.Timestamp(since) < conf and conf - pd.Timestamp(since) <= timedelta(days=30)]
+        notes = []
+        if cfg.get("quality_lines"):
+            same = "H" if d == 1 else "L"
+            held = any(pd.Timestamp(c) < conf and conf - pd.Timestamp(c) <= timedelta(days=30)
+                       and 1e-9 * max(1.0, abs(r2)) < abs(float(lv) - r2) <= band for c, lv, _e in st["hist"][same])
+            onb = any(abs(v - r2) <= band for v in brain)
+            if not (held or onb):
+                return "not a quality line (no earlier 4H %s and no 4H brain level within %.5g)" % (
+                    "top" if d == 1 else "bottom", band)
+            notes.append("quality line: %s" % " + ".join(x for x, y in (("held before", held), ("4H brain level", onb)) if y))
+        rule = cfg.get("reversal_rule", "none")
+        if kind == "reversal" and rule in ("brain4", "vote2"):
+            c1_ = any(abs(v - r1) <= band for v in brain)                                  # on a 4H brain level
+            if rule == "brain4":
+                if not c1_:
+                    return "a reversal whose turning point (R1) is not at a 4H brain level"
+                notes.append("reversal: turning point on a 4H brain level")
+            else:                                                                          # BTC (decision 54): 2 of 3
+                ty = "L" if d == 1 else "H"                                                # R1 = a swing low (buy) / high (sell)
+                c2_ = any(pd.Timestamp(c) < conf and conf - pd.Timestamp(c) <= timedelta(days=30)
+                          and abs(float(lv) - r1) <= band for c, lv, _e in st["hist"][ty])  # the turning point held before
+                y = _yday_side(t1, _h, _l, conf, d)                                         # yesterday's low (buy) / high (sell)
+                c3_ = y is not None and abs(y - r1) <= band
+                n = int(c1_) + int(c2_) + int(c3_)
+                txt = "4H brain level %s, held before %s, yesterday's %s %s" % (
+                    "yes" if c1_ else "no", "yes" if c2_ else "no", "low" if d == 1 else "high", "yes" if c3_ else "no")
+                if n < 2:
+                    return "a reversal whose turning point passes %d of 3 checks (%s) -- needs 2" % (n, txt)
+                notes.append("reversal: %d of 3 (%s)" % (n, txt))
+        self._checks = "; ".join(notes) or None
+        return None
+
+    def _room_ok(self, st, cfg, d, e, t, atr1):
+        """B12.1 (decision 48): True if no prominent level -- a 4H brain level, a level that held twice (2+ 4H
+        swings of the last 30 days within half a 1H move) or yesterday's low (sell) / high (buy) -- lies within
+        room_atr 4H moves ahead of the entry."""
+        t4, a4 = self._t4a4
+        T = pd.Timestamp(t)
+        k4 = int(t4.searchsorted(T, side="right")) - 1
+        a4t = float(a4[k4]) if k4 >= 0 else float("nan")
+        if not (a4t == a4t and a4t > 0):
+            return True
+        w = float(cfg.get("room_atr", 1.0)) * a4t
+        lo, hi = (e - w, e) if d == -1 else (e, e + w)
+        inside = (lambda x: lo <= x < hi) if d == -1 else (lambda x: lo < x <= hi)
+        for tf_, v, since in st.get("brain_hist", []):
+            if tf_ == "4H" and pd.Timestamp(since) < T and T - pd.Timestamp(since) <= timedelta(days=30) and inside(float(v)):
+                return False
+        be = LEVEL_NEAR_ATR * float(atr1) if atr1 == atr1 and atr1 > 0 else 0.0
+        lv = [float(x) for c, x, _e in st["hist"]["L" if d == -1 else "H"]
+              if pd.Timestamp(c) < T and T - pd.Timestamp(c) <= timedelta(days=30)]
+        if any(inside(x) and sum(1 for y in lv if abs(y - x) <= be) >= 2 for x in lv):
+            return False
+        t1, hi1, lo1, _a = self._lab
+        days = (pd.DatetimeIndex(t1) - pd.Timedelta(hours=1)).normalize()
+        cand = days[days <= T.normalize() - pd.Timedelta(days=1)]
+        if len(cand):
+            m = np.asarray(days == cand.max())
+            if inside(float(lo1[m].min()) if d == -1 else float(hi1[m].max())):
+                return False
+        return True
 
     def _end(self, st, s, reason, emit, t):
         st["setups"] = [x for x in st["setups"] if x["id"] != s["id"]]
@@ -439,14 +579,60 @@ class NSEngine:
                     self._end(st, s, "NS_EXPIRED", emit, t)
                     continue
                 rb = c if self.variant == "1H_BREAK" else r4     # B12 exploration: the break on any 1H close
-                if rb is None:
+                _h1 = self.variant is None and cfg.get("break_rule") == "big_or_1h_hold"
+                _conf1h = False
+                if _h1 and rb is None and s.get("pend1h") is not None:
+                    # B12.1 (Desire 30 Sep, 1b): the NEXT 1H candle after a small break must close past the line --
+                    # then the break counts at this 1H close; if not, that small break doesn't count (the line stays).
+                    s.pop("pend1h", None)
+                    rb, a4b = c, (s.get("atr4") or 0.0)
+                    broke = d * (c - r2) > 0
+                    how = ("BREAK (confirmed: the next 1H candle held past the line)" if broke
+                           else "no (the next 1H candle closed back inside the line)")
+                    s["break_kind"] = "small, confirmed by the next 1H candle" if broke else None
+                    _conf1h = broke
+                    if emit:
+                        self._log.info("[COUNT-1-CHECK] %s NS dir=%+d tf=1H close=%.5g H=%.5g -> %s", self.asset, d, c, r2, how)
+                    if not broke:
+                        continue
+                elif rb is None:
                     continue
-                broke = d * (rb - r2) > 0
-                if emit:
+                # B12.1 (Desire 30 Sep, decision 48): a BIG break (a 4H close at least big_break_atr 4H moves past R2)
+                # counts now; a SMALL one counts only if the NEXT 4H candle closes further past. Live engine only --
+                # the practice-lane ideas keep their tested rule. (Replaces the 29 Sep clear-break margin.)
+                a4b = atr4_at.get(t) or s.get("atr4") or 0.0
+                if _conf1h:
+                    pass                                             # confirmed on the 1H candle above
+                elif _h1:
+                    if s.pop("pend1h", None) is not None and emit:   # a small break never got its next 1H candle (data gap)
+                        self._log.info("[COUNT-1-CHECK] %s NS: the small break's next 1H candle never came -- it doesn't count", self.asset)
+                    if a4b > 0 and d * (rb - r2) >= float(cfg.get("big_break_atr", 0.25)) * a4b:
+                        broke, how = True, "BREAK (big)"
+                        s["break_kind"] = "big"
+                    else:
+                        broke, how = False, "no"
+                        if d * (rb - r2) > 0:
+                            s["pend1h"] = float(rb)
+                            how = "no -- small break: waiting for the next 1H candle to hold past the line"
+                elif self.variant is None and cfg.get("break_rule") == "big_or_confirmed":
+                    _p = s.pop("pend", None)
+                    if _p is not None and d * (rb - _p) > 0:
+                        broke, how = True, "BREAK (confirmed: this 4H candle closed further past than the small break)"
+                    elif a4b > 0 and d * (rb - r2) >= float(cfg.get("big_break_atr", 0.25)) * a4b:
+                        broke, how = True, "BREAK (big)"
+                    else:
+                        broke = False
+                        how = "no (the next 4H candle did not close further past)" if _p is not None else "no"
+                        if d * (rb - r2) > 0:
+                            s["pend"] = float(rb)
+                            how += " -- small break: waiting for the next 4H candle to close further past"
+                else:
+                    broke = d * (rb - r2) > 0
+                    how = "BREAK" if broke else "no"
+                if emit and not _conf1h:
                     a4 = atr4_at.get(t) or s["atr4"]
-                    self._log.info("[COUNT-1-CHECK] %s NS dir=%+d tf=4H close=%.5g H=%.5g band=0 dist=%.2fATR4 "
-                                "tier=SWING_4H -> %s", self.asset, d, rb, r2, d * (rb - r2) / a4,
-                                "BREAK" if broke else "no")
+                    self._log.info("[COUNT-1-CHECK] %s NS dir=%+d tf=4H close=%.5g H=%.5g dist=%.2fATR4 "
+                                "tier=SWING_4H -> %s", self.asset, d, rb, r2, d * (rb - r2) / a4, how)
                 if not broke:
                     continue
                 if [d, round(r2, 6)] in st["seen"]:
@@ -458,7 +644,7 @@ class NSEngine:
                 j = i if self.variant == "1H_BREAK" else max(0, i - 3)
                 s.update(stage=1, t_break=t, h2=float(c1[j:i + 1].max() if d == 1 else c1[j:i + 1].min()))
                 _k = int(np.argmax(c1[j:i + 1]) if d == 1 else np.argmin(c1[j:i + 1]))      # display only below
-                s.update(b_t=t, b_px=float(rb), h2_t=t1[j + _k], gap2=bool(d * (rb - s["edge"]) <= 0))
+                s.update(b_t=t, b_px=float(rb), b_a4=float(a4b), h2_t=t1[j + _k], gap2=bool(d * (rb - s["edge"]) <= 0))   # B12.1: + the break's 4H ATR (display)
                 if cfg["entry"] == "B":
                     b = bar4.get(t)
                     strength = candle_strength(d, *b) if b else 0.5
@@ -524,6 +710,11 @@ class NSEngine:
             why = "filter: %s (continuations only)" % s["kind"]
         if why is None and cfg.get("no_spike") and style != "B" and strength > SPIKE:
             why = "filter: spike candle (closed at %.0f%% of its range)" % (100 * strength)
+        room = None
+        if self.variant is None and (cfg.get("quality_lines") or cfg.get("room_required")):
+            room = self._room_ok(st, cfg, d, e, t, atr)          # B12.1 (decision 48): room ahead of the entry?
+            if why is None and room is False and cfg.get("room_required"):
+                why = "no room: a prominent level within %.2g 4H moves ahead (room switch on)" % cfg["room_atr"]
         if why is not None:
             if emit:
                 self._log.info("[NS-SKIP] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- retired",
@@ -557,7 +748,7 @@ class NSEngine:
             "ns_kind_raw": s["kind"], "ns_strength": float(strength), "ns_setup_id": int(s["id"]),
             "ns_conf": str(s["conf"]), "ns_candle": str(t),
             # display only -- the proof card (steps, checks, brains at entry); never read by trading code
-            "ns_b_t": str(s.get("b_t")), "ns_b_px": s.get("b_px"), "ns_h2_t": str(s.get("h2_t")),
+            "ns_b_t": str(s.get("b_t")), "ns_b_px": s.get("b_px"), "ns_b_atr4": s.get("b_a4"), "ns_break_kind": s.get("break_kind"), "ns_checks": s.get("checks"), "ns_h2_t": str(s.get("h2_t")),
             "ns_touch_t": str(s.get("t_touch")) if s.get("t_touch") is not None else None,
             "ns_touch_px": s.get("touch_px"), "ns_gap1_instant_retest": bool(s.get("gap1", False)),
             "ns_gap2_break_inside_zone": bool(s.get("gap2", False)),
@@ -567,6 +758,9 @@ class NSEngine:
             "ns_brain_1h_age_days": round(float(_cs_get(getattr(self, "_cs_now", None), "livermore_state_age_1h") or 0) / 24.0, 1),
         }
         fields.update(self._labels(st, i, d, e, atr, style, strength, s))   # B12: tracking labels only
+        if room is not None:                           # B12.1 (decision 48): room is a tag unless switched on
+            fields["ns_room"] = bool(room)
+            (fields["ns_aplus"] if room else fields["ns_watch"]).append("room ahead" if room else "no room ahead")
         fields["ns_explore"] = self.variant
         if kind == "MR_REV":
             fields.update({"setup_active_mr": True, "setup_kind_mr": kind, "setup_dir_mr": d,
@@ -629,7 +823,7 @@ class NSEngine:
             t1, hi1, lo1, a1 = self._lab
             if float(hi1[i]) - float(lo1[i]) >= BIG_CANDLE_ATR * float(atr):
                 aplus.append("big entry candle")                                        # 30 A (Test 7c)
-            if s is not None and s.get("kind") == "reversal":
+            if s is not None and s.get("kind") in ("reversal", "continuation"):
                 ic = int(t1.searchsorted(pd.Timestamp(s["conf"]), side="left"))
                 ac = float(a1[ic]) if 2 <= ic < len(t1) else float("nan")
                 if ac == ac and ac > 0:
@@ -638,15 +832,21 @@ class NSEngine:
                     def _brain(tf, days, x):
                         return any(tf_ == tf and since <= tp and (tp - since) <= timedelta(days=days)
                                    and abs(float(x) - float(v)) <= hb for tf_, v, since in st.get("brain_hist", []))
-                    if _brain("1H", 10, s["r1"]):
-                        aplus.append("reversal at 1H brain level")                      # 27 A (Test 7a)
-                    if _brain("4H", 30, s["r2"]):
-                        aplus.append("reversal breaks 4H brain level")                  # 32 A (Test 8a)
+                    # B12.1 (Desire 29 Sep, decision 46 A): re-tested on the FIXED brain -- labels 27 ("reversal at 1H
+                    # brain level") and 32 ("reversal breaks 4H brain level") no longer held and are gone; these two did:
+                    if s["kind"] == "continuation":
+                        if _brain("4H", 30, s["r2"]):
+                            aplus.append("continuation breaks 4H brain level")          # 46 A (Test 8a, fixed brain)
+                        raise StopIteration                    # the checks below are for reversals only
+                    if _brain("4H", 30, s["r1"]):
+                        aplus.append("reversal at 4H brain level")                      # 46 A (Test 7a, fixed brain)
                     t4, hi4, lo4 = self._lab4
                     k4 = int(t4.searchsorted(tp, side="right")) - 1
                     if k4 >= 2 and _open_4h_gap_near(hi4, lo4, k4, d == 1, float(s["r1"]), hb):
                         watch.append("reversal inside open 4H gap")                     # 28 A (Test 7a)
                     yday = _yday_hl_near(t1, hi1, lo1, pd.Timestamp(s["conf"]), float(s["r1"]), hb)   # 34 A
+        except StopIteration:
+            pass
         except Exception as _lab_err:
             if not getattr(self, "_lab_warned", False):          # rule 13: a broken label check must show up once
                 self._lab_warned = True
@@ -709,7 +909,8 @@ class NSEngine:
                     continue
                 if key not in lv2 or lv2[key][0] != float(v):
                     lv2[key] = (float(v), now)
-                    st.setdefault("brain_hist", []).append((tf, float(v), now))     # B12: labels and bounces
+                    if tf == "1H" or self.variant is not None:     # B12.1 (57 B): 4H levels come from _brain4_step
+                        st.setdefault("brain_hist", []).append((tf, float(v), now))     # B12: labels and bounces
         st["brain_hist"] = [x for x in st.get("brain_hist", []) if now - x[2] <= timedelta(days=BRAIN_HIST_DAYS)]
         for key, (v, since) in list(lv2.items()):
             tf = key.split()[0]
@@ -755,6 +956,37 @@ def _open_4h_gap_near(hi4, lo4, k4, bull, x, band):
         if zl - band <= x <= zh + band:
             return True
     return False
+
+
+UP4 = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")     # as the research's UP
+_LSM_CACHE = {}
+
+
+def _lsm_mod():
+    """B12.1 (57 B): the fixed brain module and its per-market settings (loaded once)."""
+    if "m" not in _LSM_CACHE:
+        try:
+            from src.execution import livermore_state_machine as _m
+            import json as _json
+            import os as _os
+            _p = _json.load(open(_os.path.join("config", "aggregator_presets.json"), encoding="utf-8-sig")).get("LIVERMORE_PIVOTS", {})
+            _LSM_CACHE["m"], _LSM_CACHE["p"] = _m, _p
+        except Exception as _e:
+            logging.getLogger(__name__).warning("[NS-BRAIN] the brain module could not be loaded -- brain checks see no levels: %s", _e)
+            _LSM_CACHE["m"], _LSM_CACHE["p"] = None, {}
+    return _LSM_CACHE["m"], _LSM_CACHE["p"]
+
+
+def _yday_side(t1, hi1, lo1, conf, d):
+    """B12.1 (decision 54): the previous UTC day's LOW for a buy (d=+1) / HIGH for a sell (days by candle open time,
+    the latest day with candles on or before yesterday -- as the research). None if unknown."""
+    days = (t1 - pd.Timedelta(hours=1)).normalize()
+    prev = pd.Timestamp(conf).normalize() - pd.Timedelta(days=1)
+    m = days <= prev
+    if not m.any():
+        return None
+    sel = days == days[m].max()
+    return float(lo1[sel].min()) if d == 1 else float(hi1[sel].max())
 
 
 def _yday_hl_near(t1, hi1, lo1, conf, x, band):

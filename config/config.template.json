@@ -2099,7 +2099,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.48,
-        "min_sl_pct": 0.0035
+        "min_sl_pct": 0.0035,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "USOIL": {
         "entry": "B",
@@ -2108,7 +2114,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.48,
-        "min_sl_pct": 0.0055
+        "min_sl_pct": 0.0055,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "USTEC": {
         "entry": "B",
@@ -2117,7 +2129,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.67,
-        "min_sl_pct": 0.0025
+        "min_sl_pct": 0.0025,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "EURUSD": {
         "entry": "E",
@@ -2127,7 +2145,13 @@
         "no_spike": true,
         "min_rr": 0.5,
         "min_sl_pct": 0.0012,
-        "min_reward_ccy": 0.0
+        "min_reward_ccy": 0.0,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "GBPAUD": {
         "entry": "E",
@@ -2137,7 +2161,13 @@
         "no_spike": true,
         "min_rr": 0.5,
         "min_sl_pct": 0.0025,
-        "min_reward_ccy": 0.0
+        "min_reward_ccy": 0.0,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "BTC": {
         "entry": "E2",
@@ -2146,7 +2176,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.6,
-        "min_sl_pct": 0.006
+        "min_sl_pct": 0.006,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "vote2",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "EURJPY": {
         "min_reward_ccy": 0.0,
@@ -2156,7 +2192,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0012
+        "min_sl_pct": 0.0012,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "JP225": {
         "entry": "B",
@@ -2165,7 +2207,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0025
+        "min_sl_pct": 0.0025,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "SILVER": {
         "entry": "B",
@@ -2174,7 +2222,13 @@
         "cont_only": false,
         "no_spike": false,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0035
+        "min_sl_pct": 0.0035,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       },
       "AUDJPY": {
         "entry": "E",
@@ -2183,7 +2237,13 @@
         "cont_only": true,
         "no_spike": true,
         "min_rr": 0.5,
-        "min_sl_pct": 0.0012
+        "min_sl_pct": 0.0012,
+        "quality_lines": true,
+        "break_rule": "big_or_1h_hold",
+        "big_break_atr": 0.25,
+        "reversal_rule": "brain4",
+        "room_required": false,
+        "room_atr": 1.0
       }
     },
     "ns_pause_limits_r": {
