@@ -2295,6 +2295,17 @@ class CompositeStateBuilder:
                 self._ns_engine = NSEngine(self.asset_type)
             _res_ns = self._ns_engine.update(self._ns_state.get(self.asset_type), df, df_4h, _pcfg_ns, state)
             self._ns_state[self.asset_type] = _res_ns["state"]
+            # B13 (Desire 2 Oct): the package judges the signals the engine handed over (ns_package.py). Its entries
+            # join this cycle's proofs and follow exactly the same path to the trade; its decisions go to Telegram.
+            state.pkg_events = []
+            try:
+                from src.execution import ns_package as _ns_pkg
+                _pkg_proofs, state.pkg_events = _ns_pkg.step(self.asset_type, _res_ns["state"], df, _pcfg_ns)
+                if _pkg_proofs:
+                    _res_ns["proofs"] = list(_res_ns["proofs"] or []) + list(_pkg_proofs)
+            except Exception as _pkg_err:
+                logger.error("[PKG] %s: package step failed -- nothing decided this cycle: %s", self.asset_type,
+                             _pkg_err, exc_info=True)
             # HF-1 (28 Sep): the old engine must never reach the council -- not even from old stores restored
             # after a weekend. Empty its lanes every cycle and clear anything it confirmed; only the new
             # engine's proof fields (set just below) may switch brc_confirmed back on.
