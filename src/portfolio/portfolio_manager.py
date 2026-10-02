@@ -3219,7 +3219,10 @@ class PortfolioManager:
         """
         positions_to_close = []  # (asset, exit_price, reason, size)
 
-        for asset, position in list(self.positions.items()):
+        for _pos_key, position in list(self.positions.items()):
+            # B13 (2 Oct): positions are stored by trade id ("BTC_long_1790895623") but the candles arrive by market
+            # ("BTC"). Look the candle up by the trade's market -- before this, no open trade ever got a new candle.
+            asset = getattr(position, "asset", None) or _pos_key
             if asset not in ohlc_data_dict:
                 continue
 
@@ -3230,6 +3233,9 @@ class PortfolioManager:
                 exit_signal = position.update_with_new_bar(
                     high=ohlc["high"], low=ohlc["low"], close=ohlc["close"]
                 )
+                logger.info("[VTM-BAR] %s %s: new candle fed to the trade (candles in trade: %s)", asset,
+                            getattr(position, "side", "?"),
+                            getattr(getattr(position, "trade_manager", None), "bars_in_trade", "?"))
 
                 # If VTM signals exit or action, handle it
                 if exit_signal:

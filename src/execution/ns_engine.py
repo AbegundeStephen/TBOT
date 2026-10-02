@@ -40,6 +40,8 @@ MIN_SWING_ATR4 = 1.0
 TOUCH_ATR = 1.0
 ALLOW_ATR = 0.3
 FRESH_ATR = 2.5
+PKG_NEAR = 0.5                 # B13 (Desire 2 Oct): a bigger 4H line this close ahead (4H moves) -> the package
+PKG_AHEAD_DAYS = 60            # B13: bigger 4H lines are looked for this far back
 STOP_CAP_ATR = 5.0
 GATE_TARGET_ATR = 2.5          # the R:R screen the tests used, for every market
 WAIT_BREAK = timedelta(days=10)
@@ -293,6 +295,7 @@ class NSEngine:
         atr4_at = dict(zip(t4, a4))
         bar4 = {t: (h, l, c) for t, h, l, c in zip(t4, hi4, lo4, c4)}
         sw = swings_4h(t4, hi4, lo4, c4)
+        self._sw4 = sw                               # B13: the package's 'bigger line just ahead' check (read-only)
 
         n1 = len(t1)
         _rev = self._revised(st, t1, hi1, lo1, c1)
@@ -701,15 +704,28 @@ class NSEngine:
         why = None
         if cfg["entry"] != style:
             return
-        if d * (e - r2) / atr > FRESH_ATR:
+        too_far = d * (e - r2) / atr > FRESH_ATR
+        if too_far:
             why = "too far from R2 (%.2f moves)" % (d * (e - r2) / atr)
         stop, target = ns_levels(d, e, r2, atr, cfg["min_sl_pct"], cfg["target_atr"])
         if why is None and (stop is None or not gate_rr_ok(e, stop, atr, cfg["min_rr"])):
             why = "no valid stop / R:R below %.2f" % cfg["min_rr"]
-        if why is None and cfg.get("cont_only") and s["kind"] != "continuation":
+        f_cont = bool(cfg.get("cont_only") and s["kind"] != "continuation")
+        f_spike = bool(cfg.get("no_spike") and style != "B" and strength > SPIKE)
+        if why is None and f_cont:
             why = "filter: %s (continuations only)" % s["kind"]
-        if why is None and cfg.get("no_spike") and style != "B" and strength > SPIKE:
+        if why is None and f_spike:
             why = "filter: spike candle (closed at %.0f%% of its range)" % (100 * strength)
+        # B13 (Desire 2 Oct): the package. A small line broken with a bigger 4H line just ahead, or a signal the
+        # engine calls too far, is handed over instead of traded or retired. Everything else is unchanged.
+        pkg_route = None
+        if self.variant is None and style == "E" and bool(cfg.get("package")) and not f_cont and not f_spike:
+            if too_far:
+                pkg_route, why = "far", None
+            elif why is None:
+                _lvl, _edg, _dist = self._bigger_ahead(d, e, t)
+                if _lvl is not None and _dist <= PKG_NEAR:
+                    pkg_route = "near"
         room = None
         if self.variant is None and (cfg.get("quality_lines") or cfg.get("room_required")):
             room = self._room_ok(st, cfg, d, e, t, atr)          # B12.1 (decision 48): room ahead of the entry?
@@ -768,6 +784,25 @@ class NSEngine:
                            "setup_ref_tier_mr": "SWING_4H", "setup_ref_tests_mr": 0})
         proof = {"key": (self.asset, kind, d, round(float(r2), 8)), "kind": kind, "dir": d, "ref": float(r2),
                  "tests": 0, "first_ts": str(t), "fields": fields}
+        if pkg_route is not None and not emit:
+            # found while catching up -- never traded, exactly as before: a too-far signal was simply retired, a near
+            # one is recorded as missed by the original path below
+            if pkg_route == "far":
+                return
+            pkg_route = None
+        if pkg_route is not None:
+            _lvl, _edg, _dist = self._bigger_ahead(d, e, t)
+            rec = {"id": int(s["id"]), "asset": self.asset, "d": int(d), "kind": kind, "route": pkg_route,
+                   "r2": float(r2), "r1": float(s["r1"]), "edge": float(s["edge"]), "trig": float(peak),
+                   "t_touch": str(s.get("t_touch")), "tE": str(t), "eE": float(e), "atrE": float(atr),
+                   "big": (float(_lvl) if _lvl is not None else None), "big_dist": (float(_dist) if _dist is not None else None),
+                   "status": "watching", "last_t": None, "maj": None, "announced": False, "fields": fields}
+            st.setdefault("pkg", []).append(rec)
+            self._log.info("[PKG-HANDOVER] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- the package takes over",
+                           self.asset, tier, d, r2, e,
+                           ("bigger 4H line %.5g just ahead (%.2f 4H moves)" % (_lvl, _dist)) if pkg_route == "near"
+                           else "%.2f moves past the line (too far to take at once)" % (d * (e - r2) / atr))
+            return
         _hist = st.setdefault("proofs_hist", [])                   # display only: the chart's recent proofs
         _hist.append(dict(proof, missed=not emit))
         if len(_hist) > 30:
@@ -785,6 +820,28 @@ class NSEngine:
             out["missed"].append(proof)
             self._log.info("[NS-MISSED] %s: %s dir=%+d R2=%.5g at %s -- found while catching up, not traded",
                         self.asset, tier, d, r2, str(t))
+
+    def _bigger_ahead(self, d, e, t):
+        """B13 (Desire 2 Oct): the nearest bigger 4H line ahead of price -- a 4H swing close from the last
+        PKG_AHEAD_DAYS days, confirmed by time t -- and its distance in 4H moves. (None, None, None) when none."""
+        sw = getattr(self, "_sw4", None) or []
+        t4, a4 = getattr(self, "_t4a4", (None, None))
+        if not sw or t4 is None or len(t4) == 0:
+            return None, None, None
+        tt = pd.Timestamp(t)
+        k = int(np.searchsorted(pd.DatetimeIndex(t4).values, np.datetime64(tt), side="right")) - 1
+        a = float(a4[k]) if k >= 0 else float("nan")
+        if not (a == a and a > 0):
+            return None, None, None
+        typ, t0, best = ("H" if d == 1 else "L"), tt - pd.Timedelta(days=PKG_AHEAD_DAYS), None
+        for cf, ty, lv, ed in sw:
+            if ty != typ or cf > tt or cf < t0:
+                continue
+            if d * (lv - e) > 0 and (best is None or d * (lv - e) < d * (best[0] - e)):
+                best = (lv, ed)
+        if best is None:
+            return None, None, None
+        return best[0], best[1], d * (best[0] - e) / a
 
     def _labels(self, st, i, d, e, atr, style, strength, s=None):
         """B12 (Desire 28 Sep, ruling 2): tracking labels -- never read by trading code.

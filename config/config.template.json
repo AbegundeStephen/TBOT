@@ -2093,7 +2093,7 @@
     },
     "ns_markets": {
       "GOLD": {
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2105,10 +2105,11 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "USOIL": {
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2120,10 +2121,11 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "USTEC": {
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2135,7 +2137,8 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "EURUSD": {
         "entry": "E",
@@ -2151,7 +2154,8 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "GBPAUD": {
         "entry": "E",
@@ -2167,10 +2171,11 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "BTC": {
-        "entry": "E2",
+        "entry": "E",
         "target_atr": null,
         "exit": "RUNNER",
         "cont_only": false,
@@ -2182,11 +2187,12 @@
         "big_break_atr": 0.25,
         "reversal_rule": "vote2",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "EURJPY": {
         "min_reward_ccy": 0.0,
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2198,10 +2204,11 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "JP225": {
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2213,10 +2220,11 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "SILVER": {
-        "entry": "B",
+        "entry": "E",
         "target_atr": 4.0,
         "exit": "FIXED",
         "cont_only": false,
@@ -2228,7 +2236,8 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       },
       "AUDJPY": {
         "entry": "E",
@@ -2243,7 +2252,8 @@
         "big_break_atr": 0.25,
         "reversal_rule": "brain4",
         "room_required": false,
-        "room_atr": 1.0
+        "room_atr": 1.0,
+        "package": true
       }
     },
     "ns_pause_limits_r": {
@@ -2279,7 +2289,8 @@
           "EMA 20 (1H)"
         ]
       }
-    }
+    },
+    "council_suspended": true
   },
   "btc_volume_source": "binance"
 }

@@ -3241,6 +3241,8 @@ class TradingBot:
         passed the engine's tested rules and the safety gates trades. On when phase_config.council_advisory is
         true and the -10R limit has not switched it back. Shares the trial ledger (data/council_trial.json):
         trades the council refused are marked trial_only, so they close into the same -10R check."""
+        if bool(self._b7_trial_cfg().get("council_suspended", False)):
+            return True        # B13 (Desire 2 Oct): the council is suspended -- it may still vote, it never blocks a proof
         if not bool(self._b7_trial_cfg().get("council_advisory", False)):
             return False
         led = self._b7_trial_ledger()
@@ -6982,6 +6984,12 @@ class TradingBot:
                             live_price=current_price
                         )
                 details["aggregator_mode"] = "council"
+                # B13 (Desire 2 Oct): the package's decisions (taken over / entered / cancelled) -- never silent
+                for _pkg_ev in (getattr(_cs, "pkg_events", None) or []):
+                    try:
+                        self._b7_telegram(str(_pkg_ev.get("text", "")))
+                    except Exception as _pkg_tg_err:
+                        logger.warning("[PKG] %s: Telegram notice failed: %s", asset_name, _pkg_tg_err)
                 # B12 (Desire 28 Sep, rulings 1A and 2): the council votes; a new-engine proof decides (advisory
                 # mode), and the proof's tracking labels ride on the trade.
                 signal, details = self._b12_council_advisory(asset_name, signal, details, _cs)
