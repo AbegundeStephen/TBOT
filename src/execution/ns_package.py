@@ -4,7 +4,7 @@ The engine (ns_engine.py) hands over an E signal (4H break, 1H retest, 1H close 
 line with a bigger 4H line just ahead (within half a 4H move), or when it is too far from the line to take at once.
 Everything else is traded by the engine as before.
 
-The package decides with the evidence -- the middle way, as ruled on 2 Oct (B's re-read, but only past the wall):
+The package decides with the evidence -- version A since B13 item 29 (Desire 5 Oct): proof by closes only.
   1. Bigger timeframes first (once, at the signal): weekly and daily count as WITH when 2 of 3 agree -- price past the
      50 EMA with the 50 past the 200; swing structure (higher highs and lows for buys); a diagonal through the last two
      swing points, confirmed by a third touch. The 4H counts when its close is past the 20 EMA and the 20 past the 50.
@@ -28,6 +28,7 @@ import pandas as pd
 from src.execution.ns_engine import (STOP_CAP_ATR, atr14, close_times, gate_rr_ok, hourly_to_4h,
                                      market_settings)
 
+RE_READ = False                # B13 item 29 (Desire 5 Oct): version A -- the re-read shortcut is off (True = middle way)
 logger = logging.getLogger(__name__)
 
 WAIT_H = 24          # Desire 2 Oct: 24 hours
@@ -217,7 +218,7 @@ def step(asset, st, df1, pcfg, now=None, frames=None):
                     ls = l30[k - 2:k + 1] if d == 1 else h30[k - 2:k + 1]
                     stair = (ls[0] < ls[1] < ls[2]) if d == 1 else (ls[0] > ls[1] > ls[2])
                     above = d * (q - e30[k]) > 0 and d * (e30[k] - e30[k - 2]) > 0
-                    if s4 and stair and above and d * (last1h - trig) > 0 and d * (q - level) > 0:
+                    if RE_READ and s4 and stair and above and d * (last1h - trig) > 0 and d * (q - level) > 0:
                         how = "re-read past the wall (4H candle, 30m staircase, 20 EMA)"     # middle way
             if how is None:
                 continue

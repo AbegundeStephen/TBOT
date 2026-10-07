@@ -3409,7 +3409,8 @@ async function loadChartsSection() {
         document.getElementById('chart-last-updated').textContent =
             'Updated ' + timeAgo(new Date(meta.updated_at).getTime());
         const bust = Date.now();
-        body.innerHTML = `<img src="${API}/api/chart/${chartAsset}?t=${bust}" alt="${chartAsset} decision chart" style="width:100%;border-radius:8px;display:block;">`;
+        // B13 item 9C: the combined white chart (click to open full size); falls back to the proof card if not drawn yet
+        body.innerHTML = `<a href="${API}/combined/${chartAsset}?t=${bust}" target="_blank" title="open full size"><img src="${API}/combined/${chartAsset}?t=${bust}" alt="${chartAsset} combined chart" style="width:100%;border-radius:8px;display:block;cursor:zoom-in;" onerror="this.onerror=null;this.src='${API}/api/chart/${chartAsset}?t=${bust}';"></a>`;
     } catch (e) {
         body.innerHTML = emptyState('🖼️', 'Could not load chart');
     }

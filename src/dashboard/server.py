@@ -354,7 +354,7 @@ def get_stats():
 
         # Get performance stats
         trades = supabase.table("trades").select("*").eq("status", "closed").execute()
-        
+
         # Calculate strategy stats
         strategy_stats = {}
         if trades.data:
@@ -362,7 +362,7 @@ def get_stats():
                 strat = t.get("strategy", "UNKNOWN") or "UNKNOWN"
                 if strat not in strategy_stats:
                     strategy_stats[strat] = {"wins": 0, "losses": 0, "pnl": 0.0}
-                
+
                 pnl = t.get("pnl", 0)
                 if pnl > 0:
                     strategy_stats[strat]["wins"] += 1
@@ -749,12 +749,12 @@ def get_logs():
     """Read the last N lines of the log file"""
     try:
         log_type = request.args.get("type", "bot")
-        
+
         if log_type == "audit":
             log_file = os.path.join(project_root, "logs", "trade_audit.log")
         else:
             log_file = os.path.join(project_root, "logs", "trading_bot.log")
-            
+
         if not os.path.exists(log_file):
             return jsonify({"logs": f"Log file {os.path.basename(log_file)} not found."})
 
@@ -1043,6 +1043,18 @@ def ns_card_image(asset):
     p = os.path.join(project_root, "logs", "charts", "%s.png" % str(asset).upper())
     if not os.path.exists(p):
         return jsonify({"error": "no card yet for %s" % asset}), 404
+    resp = send_file(p, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/combined/<asset>")
+def combined_chart_image(asset):
+    """B13 item 9C (Desire 6 Oct): the combined white chart (1H/4H/1D/1W, every layer) the bot redraws on change."""
+    from flask import send_file
+    p = os.path.join(project_root, "logs", "charts", "%s_combined.png" % str(asset).upper())
+    if not os.path.exists(p):
+        return jsonify({"error": "no combined chart yet for %s" % asset}), 404
     resp = send_file(p, mimetype="image/png")
     resp.headers["Cache-Control"] = "no-store"
     return resp

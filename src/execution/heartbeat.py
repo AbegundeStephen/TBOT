@@ -32,7 +32,7 @@ _OK_SUMMARY_S = 3600             # once an hour
 
 # B7-19: names an asset appears under in log lines. GOLD's MT5 symbol is
 # XAUUSDm, so per-asset promises on fetch lines could never match "GOLD".
-_ASSET_ALIASES_B7 = {"GOLD": ("GOLD", "XAUUSD")}
+_ASSET_ALIASES_B7 = {"GOLD": ("GOLD", "XAUUSD"), "SILVER": ("SILVER", "XAGUSD")}   # B13 item 3: SILVER logs as XAGUSDm
 
 
 class _TailHandler(logging.Handler):
@@ -283,6 +283,8 @@ class HeartbeatMonitor:
                     continue
                 if self._in_daily_break(a, window_min):
                     continue   # B8-2: the market's nightly pause
+                if _market_gated and self._b13_window_hits_weekend(a, window_min):
+                    continue   # B13 item 6: the window reaches back into the weekend close
                 if _market_gated and self._is_market_closed(a):
                     if (pid, a) not in self._market_skip_logged:
                         self._market_skip_logged.add((pid, a))
@@ -297,6 +299,8 @@ class HeartbeatMonitor:
                     bad.append(f"{a}={n}>{_max}")
             return (not bad), (f"{tag}: " + ", ".join(bad) if bad else "")
 
+        if _market_gated and self._b13_window_hits_weekend(None, window_min):
+            return True, ""    # B13 item 6: a market-wide check whose window reaches back into the weekend close
         if p.get("when") == "positions_open" and not self._has_open_positions():
             if pid not in self._market_skip_logged:
                 self._market_skip_logged.add(pid)
@@ -564,6 +568,22 @@ class HeartbeatMonitor:
     # UTC). Times widened a little either side; the check's own window after
     # the pause is skipped too. Override with "daily_break_utc" in the registry.
     _DAILY_BREAK_UTC_B8 = {"GOLD": ("21:50", "23:15"), "USTEC": ("21:50", "23:15"), "USOIL": ("21:50", "23:15")}
+
+    def _b13_window_hits_weekend(self, asset, window_min):
+        """B13 item 6 (Desire 5 Oct): a check whose window reaches back into the weekend close (Friday 21:00 UTC ->
+        Sunday 22:00 UTC) can only read a false absence on Monday -- skip it until its window is clear of the weekend.
+        BTC trades all week, so its own per-market checks still run."""
+        if asset == "BTC":
+            return False
+        now = time.time()
+        t = now - float(window_min or 0) * 60
+        while t <= now:
+            g = time.gmtime(t)
+            wd, hm = g.tm_wday, g.tm_hour * 60 + g.tm_min           # Monday = 0 ... Sunday = 6
+            if (wd == 4 and hm >= 21 * 60) or wd == 5 or (wd == 6 and hm < 22 * 60):
+                return True
+            t += 900
+        return False
 
     def _in_daily_break(self, asset, window_min=0):
         try:

@@ -352,7 +352,7 @@ class TradingBot:
             self.config.setdefault("database", {})["supabase_url"] = os.getenv("SUPABASE_URL")
         if os.getenv("SUPABASE_KEY"):
             self.config.setdefault("database", {})["supabase_key"] = os.getenv("SUPABASE_KEY")
-        
+
         # Override Trading Mode
         if os.getenv("TRADING_MODE"):
             self.config.setdefault("trading", {})["mode"] = os.getenv("TRADING_MODE").lower()
@@ -363,7 +363,7 @@ class TradingBot:
             self.config.setdefault("telegram", {})["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN")
             # If token is provided in env, assume enabled unless explicitly disabled
             self.config.setdefault("telegram", {})["enabled"] = True
-            
+
         if os.getenv("TELEGRAM_ENABLED"):
             enabled_str = os.getenv("TELEGRAM_ENABLED").lower()
             self.config.setdefault("telegram", {})["enabled"] = enabled_str in ("true", "1", "yes")
@@ -384,22 +384,22 @@ class TradingBot:
         if os.getenv("BINANCE_API_SECRET"):
             self.config.setdefault("api", {}).setdefault("binance_futures", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
             self.config.setdefault("api", {}).setdefault("binance", {})["api_secret"] = os.getenv("BINANCE_API_SECRET")
-            
+
         # Determine if we should use testnet
         is_testnet = self.config.get("api", {}).get("binance_futures", {}).get("testnet", False)
         if os.getenv("BINANCE_TESTNET"):
             is_testnet = os.getenv("BINANCE_TESTNET").lower() in ("true", "1", "yes")
         elif self.config.get("trading", {}).get("mode") == "paper":
             is_testnet = True # Default to testnet in paper mode
-            
+
         self.config.setdefault("api", {}).setdefault("binance_futures", {})["testnet"] = is_testnet
         self.config.setdefault("api", {}).setdefault("binance", {})["testnet"] = is_testnet
-        
+
         if is_testnet:
             logger.info("[CONFIG] Binance API will use TESTNET endpoints")
         else:
             logger.info("[CONFIG] Binance API will use LIVE endpoints")
-            
+
         if os.getenv("MT5_LOGIN"):
             self.config.setdefault("api", {}).setdefault("mt5", {})["login"] = int(os.getenv("MT5_LOGIN"))
         if os.getenv("MT5_PASSWORD"):
@@ -414,15 +414,15 @@ class TradingBot:
             portfolio_cfg = self.config.get("portfolio", {})
             risk_per_trade = portfolio_cfg.get("target_risk_per_trade", 0.015)
             max_drawdown = portfolio_cfg.get("max_drawdown", 0.20)
-            
+
             # 1. Validate Base Risk
             if not (0 < risk_per_trade < 0.10):
                 raise ValueError(f"Invalid target_risk_per_trade: {risk_per_trade}. Must be between 0 and 0.10 (10%)")
-            
+
             # 2. Validate Max Drawdown
             if not (0 < max_drawdown < 1.0):
                 raise ValueError(f"Invalid max_drawdown: {max_drawdown}. Must be between 0 and 1.0 (100%)")
-            
+
             # 3. Validate Fixed Risk USD for each asset
             assets_cfg = self.config.get("assets", {})
             for asset, cfg in assets_cfg.items():
@@ -431,14 +431,29 @@ class TradingBot:
                     for r_type, val in fixed_risk.items():
                         if val <= 0:
                             raise ValueError(f"Invalid fixed_risk_usd for {asset} ({r_type}): {val}. Must be > 0.")
-            
+
             logger.info("[CONFIG] ✓ All risk parameters validated and safe.")
-            
+
         except Exception as e:
             logger.error(f"[CONFIG] ❌ FATAL: Invalid configuration detected: {e}")
             raise RuntimeError(f"Startup aborted due to unsafe configuration: {e}")
 
         setup_logging(self.config)
+        # B13 item 26 (Desire 5 Oct): Telegram's daily ~03:11 "Bad Gateway" spell is transient -- the polling retries by
+        # itself. Show it as one INFO line, without a traceback, so it stops counting as an error or a Traceback alarm.
+        class _B13BadGateway(logging.Filter):
+            def filter(self, record):
+                try:
+                    _txt = record.getMessage() + " " + (str(record.exc_info[1]) if record.exc_info else "")
+                    if record.name.startswith("telegram") and "Bad Gateway" in _txt and record.levelno >= logging.WARNING:
+                        record.msg, record.args = "[TELEGRAM] transient 'Bad Gateway' from Telegram -- retrying by itself", ()
+                        record.levelno, record.levelname = logging.INFO, "INFO"
+                        record.exc_info, record.exc_text = None, None
+                except Exception:
+                    pass
+                return True
+        for _b13_h in logging.getLogger().handlers:
+            _b13_h.addFilter(_B13BadGateway())
 
         # ✨  Initialize AI components as None FIRST
         self.analyst = None
@@ -888,7 +903,7 @@ class TradingBot:
                 self.portfolio_manager.load_portfolio_state(self.data_manager)
         except Exception as e:
             logger.error(f"Error loading portfolio state: {e}")
-            
+
         logger.info("-" * 70)
 
         # ============================================================
@@ -1094,7 +1109,7 @@ class TradingBot:
                 signal_monitor=self.signal_monitor,
                 outcome_pipeline=self.outcome_pipeline,  # Brain rebuild Part 0.2
             )
-            
+
             logger.info(f"[TELEGRAM] Initialized for {len(admin_ids)} admin(s) (Loop will be started by main thread)")
 
         except Exception as e:
@@ -1119,7 +1134,7 @@ class TradingBot:
 
             # Ensure asset dictionary exists
             self.strategies.setdefault(asset_name, {})
-            
+
             strategies_cfg = asset_config.get("strategies", {})
 
             # 1. Mean Reversion
@@ -1167,7 +1182,7 @@ class TradingBot:
             # Safe length check
             enabled_strats = self.strategies.get(asset_name, {})
             enabled_count = len(enabled_strats)
-            
+
             if enabled_count == 0:
                 logger.warning(f"[!] {asset_name}: NO strategies enabled")
             else:
@@ -2115,19 +2130,19 @@ class TradingBot:
             from src.strategies.ema_strategy import EMAStrategy
             ema_cfg = self.config.get("strategy_configs", {}).get("exponential_moving_averages", {}).get(asset_name, {})
             ema_strat = EMAStrategy(ema_cfg)
-            
+
             # 2. Generate features
             features_df = ema_strat.generate_features(df)
             if features_df.empty:
                 return False, 0.5
-                
+
             latest = features_df.iloc[-1]
             ema_diff = latest.get("ema_diff_pct", 0.0)
-            
+
             # 3. Decision (Hysteresis)
             is_bull = ema_diff > 0
             confidence = min(1.0, 0.5 + abs(ema_diff) / 10.0)
-            
+
             self.previous_regime = is_bull
             return is_bull, confidence
 
@@ -3056,7 +3071,7 @@ class TradingBot:
 
             # ✅ Submit coroutine to the bot's event loop
             future = asyncio.run_coroutine_threadsafe(coro, loop)
-            
+
             # Wait for completion with timeout
             try:
                 future.result(timeout=15.0)
@@ -4468,20 +4483,18 @@ class TradingBot:
                 except Exception as _sv_err:
                     logger.debug("[VALIDATOR] cycle watchdog error: %s", _sv_err)
                 if not self.health_monitor.is_healthy():
-                    logger.critical("[HEALTH] ⚠️ System is UNHEALTHY! Triggering emergency shutdown.")
-                    
-                    # 🚨 EMERGENCY: Close all trades
-                    self.portfolio_manager.emergency_close_all()
-                    
-                    # Optionally notify via Telegram
-                    if self.telegram_bot:
-                        self._send_telegram_notification(
-                            self.telegram_bot.notify_error("🚨 *EMERGENCY HALT*\nSystem is UNHEALTHY. All positions have been closed for safety!")
-                        )
-                    
-                    # Stop the bot
-                    self.stop()
-                    return
+                    # B13 item 8 (Desire 5 Oct): an unhealthy reading NEVER closes trades or stops the bot. It alerts (at most
+                    # once an hour) and new entries pause -- the pre-trade health veto blocks them -- until it clears.
+                    logger.critical("[HEALTH] System is UNHEALTHY -- new entries paused until it clears; open trades untouched")
+                    if time.time() - getattr(self, "_b13_health_alert_t", 0) > 3600:
+                        self._b13_health_alert_t = time.time()
+                        self._b13_tg_direct("TBOT HEALTH: unhealthy -- new entries paused, open trades untouched. %s" % (
+                            self.health_monitor.get_status(),))
+                    self._b13_health_bad = True
+                elif getattr(self, "_b13_health_bad", False):
+                    self._b13_health_bad = False
+                    logger.info("[HEALTH] healthy again -- new entries allowed")
+                    self._b13_tg_direct("TBOT HEALTH: healthy again -- new entries allowed.")
 
             logger.info("\n" + "=" * 70)
             logger.info(f"[CYCLE] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -4489,7 +4502,7 @@ class TradingBot:
 
             # ✨ NEW: Update historical data every hour (or every 12 cycles if running every 5 min)
             current_time = datetime.now()
-            
+
             # Debug log to track history update frequency
             time_since_last = (current_time - self._last_history_update).total_seconds() if self._last_history_update else "N/A"
             logger.info(f"[HISTORY] Last update: {self._last_history_update} ({time_since_last}s ago)")
@@ -4791,9 +4804,17 @@ class TradingBot:
             enabled = sorted(enabled, key=_get_cached_score, reverse=True)
 
             # Trade each asset
+            _b13_times, _b13_c0 = {}, time.time()            # B13 item 17: how long each market takes, once per cycle
             for asset_name in enabled:
                 try:
+                    if getattr(self, "health_monitor", None):
+                        self.health_monitor.heartbeat()     # B13 item 8: refreshed per market (a cycle takes 75-112 s)
+                    _b13_a0 = time.time()
                     self.trade_asset(asset_name)
+                    _b13_times[asset_name] = time.time() - _b13_a0
+                    if asset_name == enabled[-1]:
+                        logger.info("[CYCLE-TIME] %.0fs for %d markets | %s", time.time() - _b13_c0, len(_b13_times),
+                                    ", ".join("%s %.1fs" % kv for kv in sorted(_b13_times.items(), key=lambda kv: -kv[1])))
                     time.sleep(2)
                 except Exception as e:
                     logger.error(
@@ -5654,7 +5675,7 @@ class TradingBot:
                                 "close":  df_reinit["close"].values,
                                 "volume": df_reinit["volume"].values if "volume" in df_reinit else None
                             }
-                            
+
                             # We can re-call the initialization logic or just create the VTM here
                             from src.execution.veteran_trade_manager import VeteranTradeManager
 
@@ -5766,7 +5787,7 @@ class TradingBot:
                     if _pyramiding_on and isinstance(vtm_result, dict) and "pyramid_requests" in vtm_result:
                         for req in vtm_result["pyramid_requests"]:
                             logger.info(f"[VTM LOOP] 🗼 Executing PYRAMID for {asset_name} ({req['side'].upper()})")
-                            
+
                             # ✅ Standardized Log
                             log_trade_event("PYRAMID", {
                                 "symbol": self.config["assets"].get(asset_name, {}).get("symbol"),
@@ -5778,12 +5799,12 @@ class TradingBot:
 
                             # Convert side to signal
                             pyramid_signal = 1 if req["side"] == "long" else -1
-                            
+
                             # Add pyramiding flag to signal details
                             sig_details = req["signal_details"].copy()
                             sig_details["is_pyramid_scale_in"] = True
                             sig_details["parent_position_id"] = req["original_position_id"]
-                            
+
                             # Execute the new trade
                             pyramid_ok = handler.execute_signal(
                                 signal=pyramid_signal,
@@ -6159,6 +6180,7 @@ class TradingBot:
                 f"Circuit breaker tripped: drawdown {loss_pct:.2%} ≥ {circuit_breaker:.2%}"
             )
             logger.error(f"[BREAKER] CIRCUIT BREAKER! Loss: {loss_pct:.2%}")
+            self._b13_dd_on = True                      # B13 item 13: so the clear can be reported
             # Item 1.2: throttle to once per 5 min — with six assets live,
             # every asset's cycle hits this same check, which could otherwise
             # fire the same alert six times in the same couple of minutes.
@@ -6178,6 +6200,11 @@ class TradingBot:
                     except Exception:
                         pass
             return False
+
+        if getattr(self, "_b13_dd_on", False):        # B13 item 13 (Desire 5 Oct): the breaker has cleared
+            self._b13_dd_on = False
+            logger.info("[BREAKER] daily-loss circuit breaker cleared -- trading allowed again")
+            self._b13_tg_direct("TBOT: daily-loss circuit breaker CLEARED -- trading allowed again.")
 
         # Item 1.3: daily profit-lock system removed entirely — explicit
         # decision: no scaling down or stopping trading because a profit
@@ -6512,6 +6539,14 @@ class TradingBot:
                 self.last_market_status_log[asset_name] = current_hour
             return False, "rollover dead zone (21:30-23:30 UTC)"
 
+        # B13 item 27 (Desire 5 Oct): JP225 also pauses nightly at 22:30-23:30 box time (20:30-21:30 UTC) -- no new
+        # entries from 20:20 to 21:40 UTC (with the rollover dead zone above, that blocks 20:20-23:30 UTC)
+        if asset_name_upper == "JP225":
+            _g27 = MarketHours.get_gmt_time()
+            _m27 = _g27.hour * 60 + _g27.minute
+            if _g27.weekday() < 5 and 20 * 60 + 20 <= _m27 < 21 * 60 + 40:
+                return False, "JP225 nightly pause (20:20-21:40 UTC)"
+
         # Preferred session filter -- per asset (e.g. no GBPAUD in late Asia,
         # no GOLD outside London/NY). trading.session_filter_enabled in config.
         if self.config.get("trading", {}).get("session_filter_enabled", True):
@@ -6723,7 +6758,14 @@ class TradingBot:
             halted, reason = self.portfolio_manager.check_circuit_breaker()
             if halted:
                 logger.warning(f"[CIRCUIT BREAKER] Halted: {reason}")
+                if not getattr(self, "_b13_cb_on", False):          # B13 item 13 (Desire 5 Oct): once per trip
+                    self._b13_cb_on = True
+                    self._b13_tg_direct(f"TBOT CIRCUIT BREAKER TRIPPED -- no new trades: {reason}")
                 return
+            if getattr(self, "_b13_cb_on", False):                  # B13 item 13: and once when it clears
+                self._b13_cb_on = False
+                logger.info("[CIRCUIT BREAKER] cleared -- trading again")
+                self._b13_tg_direct("TBOT CIRCUIT BREAKER CLEARED -- trading again.")
 
             # ============================================================
             # 1. Fetch FRESH Data & Signal
@@ -6832,7 +6874,7 @@ class TradingBot:
                 current_price = float(df["close"].iloc[-1]) if not df.empty else 0.0
 
             # ✅ RE-CALCULATE REGIME (5min Cache): Ensure we are using fresh regime data
-            # before making any directional decisions. This prevents staying in a stale 
+            # before making any directional decisions. This prevents staying in a stale
             # regime for up to 30 mins after a trend flip.
             mtf_regime = {}
             if self.mtf_integration:
@@ -6990,6 +7032,14 @@ class TradingBot:
                         self._b7_telegram(str(_pkg_ev.get("text", "")))
                     except Exception as _pkg_tg_err:
                         logger.warning("[PKG] %s: Telegram notice failed: %s", asset_name, _pkg_tg_err)
+                if getattr(_cs, "pkg_events", None):            # B13 item 9B: the combined chart with every package decision
+                    try:
+                        from src.ai.combined_chart import write_combined as _b13_cw3
+                        _b13_cp3 = _b13_cw3(asset_name, df, _cs, symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
+                        if _b13_cp3 and getattr(self.telegram_bot, "send_photo_file", None):
+                            self._send_telegram_notification(self.telegram_bot.send_photo_file(_b13_cp3, "%s -- combined chart" % asset_name))
+                    except Exception as _b13_ce3:
+                        logger.warning("[COMBINED-CHART] %s: not sent with the package decision: %s", asset_name, _b13_ce3)
                 # B12 (Desire 28 Sep, rulings 1A and 2): the council votes; a new-engine proof decides (advisory
                 # mode), and the proof's tracking labels ride on the trade.
                 signal, details = self._b12_council_advisory(asset_name, signal, details, _cs)
@@ -7237,6 +7287,14 @@ class TradingBot:
                             self._b121_card_key[asset_name] = _ns_key
             except Exception as _ns_ke:
                 logger.warning(f"[NS-CARD] {asset_name}: card not written: {_ns_ke}")
+            # B13 item 9A (Desire 1/5/6 Oct): the combined white chart, logs/charts/<ASSET>_combined.png -- display only,
+            # redrawn only when a candle, a proof or a setup changed
+            try:
+                from src.ai.combined_chart import write_combined as _b13_cw
+                _b13_cw(asset_name, df, details.get("composite_state") if isinstance(details, dict) else None,
+                        symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
+            except Exception as _b13_ce:
+                logger.warning(f"[COMBINED-CHART] {asset_name}: not written: {_b13_ce}")
 
             # Personal scalp-alignment alert (off by default, see
             # config["scalp_alerts"]). Pure observer — never affects signal,
@@ -8276,6 +8334,7 @@ class TradingBot:
                     "brc_kind": details.get("brc_kind", ""),
                     "brc_confirmed": bool(details.get("brc_confirmed", False)),
                     "state_age_s": _state_age_s,
+                    "ns_entry": _cs_get("ns_entry"),     # B13 item 30: "PKG" marks a package entry
                 }
             except Exception as _me:
                 logger.warning(f"[ENTRY-MEASURE] {asset_name}: could not record ({_me})")
@@ -8656,6 +8715,21 @@ class TradingBot:
                                 _vtm = new_pos.trade_manager
                                 vtm_entry_type = getattr(_vtm, "vtm_entry_type", None)
                                 vtm_stop_type = getattr(_vtm, "stop_type", "atr")
+                                # B13 items 11 and 31 (Desire 5-6 Oct): new-engine trades get their own Type line --
+                                # the tested stop, entry E or the package, the setup type and the diagonal tag
+                                try:
+                                    _b13_cs = (details or {}).get("composite_state") or {}
+                                    _b13_g = (lambda _n: _b13_cs.get(_n) if isinstance(_b13_cs, dict)
+                                              else getattr(_b13_cs, _n, None))
+                                    if _b13_g("ns_exit"):
+                                        _b13_pkg = str(_b13_g("ns_entry") or "") == "PKG"
+                                        vtm_stop_type = "ns_pkg" if _b13_pkg else "ns_tested"
+                                        vtm_entry_type = "%s, %s, diagonal %s" % (
+                                            "package entry" if _b13_pkg else "entry E (break, retest, close-through)",
+                                            str(_b13_g("ns_kind_raw") or "setup").lower(),
+                                            "agrees" if _b13_g("ns_diag_agrees") else "none")
+                                except Exception as _b13_lbl_err:
+                                    logger.debug(f"[TELEGRAM] card label fell back: {_b13_lbl_err}")
                                 # TARGET-1 T5: same flags binance_handler.py's Fix
                                 # 14c banner already keys on, instead of the
                                 # unconditional "VTM Only" warning this path sent
@@ -8757,6 +8831,14 @@ class TradingBot:
                                 self._send_telegram_notification(self.telegram_bot.send_photo_file(_ns_card, "%s -- proof card" % asset_name))
                             elif not _ns_card:
                                 logger.warning(f"[NS-CARD] {asset_name}: no card for this trade (see the warning above)")
+                            try:                                # B13 item 9B: the combined chart with every trade
+                                from src.ai.combined_chart import write_combined as _b13_cw2
+                                _b13_cp = _b13_cw2(asset_name, df, details.get("composite_state") if isinstance(details, dict) else None,
+                                                   symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
+                                if _b13_cp and getattr(self.telegram_bot, "send_photo_file", None):
+                                    self._send_telegram_notification(self.telegram_bot.send_photo_file(_b13_cp, "%s -- combined chart" % asset_name))
+                            except Exception as _b13_ce2:
+                                logger.warning(f"[COMBINED-CHART] {asset_name}: not sent with the trade: {_b13_ce2}")
                         except Exception as _nsc_e:
                             logger.warning(f"[NS-CARD] trade card not sent: {_nsc_e}")
 
@@ -9519,7 +9601,7 @@ class TradingBot:
                 # Add regime details to the 'details' dictionary for SignalMonitoringIntegration
                 details["regime_score"] = mtf_regime.get("regime_score")
                 details["regime_reasoning"] = mtf_regime.get("reasoning")
-                
+
                 self.telegram_bot.signal_monitor.record_signal(
                     asset=asset_name,
                     signal=signal,
@@ -9839,13 +9921,17 @@ class TradingBot:
                             logger.warning("[WATCHDOG] MT5 reconnect failed: %s", _rc_err)
 
                         _down_seconds = (datetime.now() - self._mt5_down_since).total_seconds()
+                        # B13 item 19 (Desire 5 Oct): alert at the FIRST failed check (Sunday's 11-minute outage was
+                        # silent), then every 10 minutes while it stays down; sent directly, not through the Telegram thread
                         _should_alert = (
-                            _down_seconds >= 180
-                            and (
-                                self._mt5_last_alert_time is None
-                                or (datetime.now() - self._mt5_last_alert_time).total_seconds() >= 600
-                            )
+                            self._mt5_last_alert_time is None
+                            or (datetime.now() - self._mt5_last_alert_time).total_seconds() >= 600
                         )
+                        if _should_alert:
+                            self._mt5_last_alert_time = datetime.now()
+                            self._b13_tg_direct("TBOT: MT5 DISCONNECTED (down %d min so far) -- reconnecting; no trades "
+                                                "can be placed meanwhile." % int(_down_seconds // 60))
+                            _should_alert = False
                         if _should_alert and self.telegram_bot:
                             self._mt5_last_alert_time = datetime.now()
                             _alert_msg = (
@@ -9862,6 +9948,8 @@ class TradingBot:
                     else:
                         if getattr(self, "_mt5_down_since", None) is not None:
                             logger.info("[WATCHDOG] MT5 connection restored.")
+                            self._b13_tg_direct("TBOT: MT5 connection RESTORED after %d min." % int(
+                                (datetime.now() - self._mt5_down_since).total_seconds() // 60))   # B13 item 19
                         self._mt5_down_since = None
                         self._mt5_last_alert_time = None
                 except Exception as _mt5_err:
@@ -10346,7 +10434,7 @@ class TradingBot:
                 )
                 self.telegram_thread.start()
                 logger.info("[TELEGRAM] ✅ Telegram thread started.")
-            
+
             # Start dashboard server
             self.dashboard_server = start_dashboard_server()
 
@@ -10438,8 +10526,8 @@ class TradingBot:
                     if os.path.exists(_restart_flag):
                         os.remove(_restart_flag)
                         logger.info("[CONTROL] 🔄 Restart flag detected — restarting bot now…")
-                        self.stop()
-                        
+                        self.stop("restart requested (Control Center restart flag)")
+
                         # ── Windows: task-aware restart with local fallback ──────
                         if sys.platform == "win32":
                             import subprocess as _sp
@@ -10449,7 +10537,7 @@ class TradingBot:
                             _python  = sys.executable
                             _script  = str(Path(__file__).resolve())
                             _workdir = str(Path(__file__).parent.resolve())
-                            
+
                             # Reverted to structure similar to initial setup but with robust taskkill
                             _ps_cmd = (
                                 f"$t = Get-ScheduledTask -TaskName '{_task_name}' -ErrorAction SilentlyContinue; "
@@ -10493,16 +10581,31 @@ class TradingBot:
 
         except KeyboardInterrupt:
             logger.info("\n[!] KeyboardInterrupt received")
-            self.stop()
+            self.stop("Ctrl+C (KeyboardInterrupt) on the box")
 
         except Exception as e:
             logger.error(f"[FATAL] Fatal error: {e}", exc_info=True)
-            self.stop()
+            self.stop("fatal error: %s" % e)
             sys.exit(1)
 
 
 
-    def stop(self):
+    def _b13_tg_direct(self, text):
+        """B13 items 8 and 20 (Desire 5 Oct): a Telegram message sent straight away over HTTP -- it still goes out while
+        the bot is shutting down (the normal sender hands messages to the Telegram thread, which stops during shutdown)."""
+        try:
+            import requests as _rq
+            _tg = (self.config or {}).get("telegram", {}) or {}
+            _tok, _ids = _tg.get("bot_token"), _tg.get("admin_ids") or []
+            if not _tok or not _ids:
+                logger.warning("[TELEGRAM] direct send skipped: no token / admin ids")
+                return
+            for _cid in _ids:
+                _rq.post("https://api.telegram.org/bot%s/sendMessage" % _tok, json={"chat_id": _cid, "text": text}, timeout=8)
+        except Exception as _e:
+            logger.warning(f"[TELEGRAM] direct send failed: {_e}")
+
+    def stop(self, reason="not given"):
         """
         ✨  Graceful shutdown with proper Telegram cleanup
         """
@@ -10513,8 +10616,29 @@ class TradingBot:
         self._shutdown_in_progress = True
 
         logger.info("\n" + "=" * 70)
-        logger.info("[STOP] SHUTTING DOWN TRADING BOT")
+        logger.info("[STOP] SHUTTING DOWN TRADING BOT -- reason: %s" % reason)
         logger.info("=" * 70)
+
+        # B13 item 22 (Desire 5 Oct): save state FIRST, before anything slow (database, network) can hang -- on 5 Oct the
+        # shutdown never finished and nothing was saved. (They are saved again further down; saving twice is harmless.)
+        try:
+            if self.portfolio_manager:
+                self.portfolio_manager.save_portfolio_state(include_metrics=False)
+                logger.info("[SHUTDOWN] portfolio state saved (first)")
+        except Exception as _e:
+            logger.error(f"[SHUTDOWN] early portfolio save failed: {_e}")
+        try:
+            self._persist_on_shutdown()
+            logger.info("[SHUTDOWN] engine and builder stores saved (first)")
+        except Exception as _e:
+            logger.error(f"[SHUTDOWN] early store save failed: {_e}")
+        # B13 item 20 (Desire 5 Oct): a Telegram message whenever the bot stops, with the reason
+        try:
+            _open_n = self.portfolio_manager.get_open_positions_count() if self.portfolio_manager else "?"
+        except Exception:
+            _open_n = "?"
+        self._b13_tg_direct("TBOT STOPPING -- reason: %s. Open positions: %s (they stay open unless "
+                            "close_positions_on_shutdown is set)." % (reason, _open_n))
 
         # ✨ Finalize database
         if self.db_manager:
@@ -10611,7 +10735,7 @@ class TradingBot:
             logger.info("[TELEGRAM] Shutting down...")
             if hasattr(self.telegram_bot, '_shutdown_event') and self.telegram_bot._current_loop:
                 self.telegram_bot._current_loop.call_soon_threadsafe(self.telegram_bot._shutdown_event.set)
-            
+
             self.telegram_thread.join(timeout=10)
             if self.telegram_thread.is_alive():
                 logger.warning("[TELEGRAM] Thread did not terminate.")
@@ -10877,7 +11001,7 @@ def main():
     ai_model = Path("models/ai/sniper_dual_timeframe_v1.weights.h5")
     if not ai_model.exists():
         print("=" * 70)
-        print("\u26a0\ufe0f  AI MODEL NOT FOUND (Optional)")
+        print("⚠️  AI MODEL NOT FOUND (Optional)")
         print("=" * 70)
         print(f"  Missing: {ai_model}")
         print("\nBot will run without AI validation (pattern detection disabled)")

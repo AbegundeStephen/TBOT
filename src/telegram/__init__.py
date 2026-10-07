@@ -403,14 +403,14 @@ class TradingTelegramBot:
                 return
 
         self.is_running = True
-        
+
         async def main():
             self._shutdown_event = asyncio.Event()
             self._current_loop = asyncio.get_running_loop()
 
             await self.application.initialize()
             await self.application.start()
-            
+
             logger.info("[TELEGRAM] Starting keepalive task...")
             asyncio.create_task(self._keepalive_task())
 
@@ -422,9 +422,9 @@ class TradingTelegramBot:
                 allowed_updates=Update.ALL_TYPES,
                 bootstrap_retries=-1,
             )
-            
+
             await self._shutdown_event.wait()
-            
+
             await self.application.updater.stop()
             await self.application.stop()
             logger.info("[TELEGRAM] Polling stopped.")
@@ -432,7 +432,7 @@ class TradingTelegramBot:
         try:
             if sys.platform == "win32":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-            
+
             asyncio.run(main())
 
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -730,43 +730,43 @@ class TradingTelegramBot:
                 if last_signal_entry:
                     found_decisions = True
                     entry = last_signal_entry[0]
-                    
+
                     # Icons and status
                     original = entry.get("original_signal", entry["signal"])
                     final = entry["signal"]
-                    
+
                     orig_str = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(original, "UNKNOWN")
                     final_str = {1: "BUY 🟢", -1: "SELL 🔴", 0: "HOLD ⚪"}.get(final, "UNKNOWN")
-                    
+
                     # Determine result status
                     status_icon = "✅" if original == final and final != 0 else "⚠️" if original != final and final == 0 else "⚪"
                     if original == 0 and final == 0:
                         status_icon = "💤"
 
                     timestamp = entry["timestamp"].strftime("%H:%M:%S")
-                    
+
                     msg += f"<b>{html.escape(asset_name)}</b> <code>[{timestamp}]</code>\n"
                     msg += f"  ├ Original: {orig_str}\n"
                     msg += f"  ├ Final:    {final_str} {status_icon}\n"
-                    
+
                     # --- Institutional Filter Details ---
                     if original != final and final == 0:
                         reason = str(entry.get('reasoning', 'Unknown')).lower()
-                        
+
                         # 1. Trap Filter specific reporting
                         if "trap" in reason:
                             msg += f"  ├ 🪤 <b>Trap Filter:</b> <code>VETOED (Bad Structure)</code>\n"
-                        
+
                         # 2. Gatekeeper specific reporting (Only if it was the reason)
                         elif "gatekeeper" in reason:
                             r_score = entry.get("regime_score", 0)
                             r_bias = "BULLISH" if r_score > 0 else "BEARISH" if r_score < 0 else "NEUTRAL"
                             msg += f"  ├ 🛡️ <b>Gatekeeper:</b> <code>BLOCKED ({r_bias} @ {r_score:.2f})</code>\n"
-                        
+
                         # 3. Momentum / ATR Gate reporting
                         elif "expansion" in reason or "atr" in reason:
                             msg += f"  ├ 🚀 <b>Momentum:</b> <code>VETOED (Low Vol Expansion)</code>\n"
-                        
+
                         # 4. Volatility Gate
                         elif "volatility" in reason:
                             msg += f"  ├ 📉 <b>Volatility:</b> <code>BLOCKED (Dead Market)</code>\n"
@@ -774,14 +774,14 @@ class TradingTelegramBot:
                         # 5. Sniper / Pattern rejection
                         elif "sniper" in reason or "pattern" in reason:
                             msg += f"  ├ 🎯 <b>Sniper:</b> <code>REJECTED (No Edge)</code>\n"
-                        
+
                         # General fallback if not specific
                         else:
                             msg += f"  ├ ⚠️ <b>Veto:</b> <code>{html.escape(str(entry.get('reasoning', 'N/A')))}</code>\n"
-                    
+
                     elif final != 0:
                         msg += f"  ├ <b>Status:</b> <code>{html.escape(str(entry.get('reasoning', 'N/A')))}</code>\n"
-                    
+
                     # Add trade type and regime context
                     regime_name = entry.get('regime', 'NEUTRAL')
                     msg += f"  └ Context:  <code>{entry.get('trade_type', 'TREND')} | {regime_name}</code>\n\n"
@@ -1222,12 +1222,12 @@ class TradingTelegramBot:
                     _tp_label = f"{self._fmt_px(_tp_price)} ({_tp_dist:+.2f}%)" if _tp_price else "none set"
                     msg += f"🎯 TP: {_tp_label}\n"
                     msg += f"{lock_emoji} Profit Lock: {'ON' if vtm_status['profit_locked'] else 'OFF'}\n"
-                    
+
                     # Display dynamic VTM parameters
                     if vtm_status.get("early_lock_atr_multiplier") is not None:
                         msg += f"🔗 Early Lock: Dynamic ({vtm_status['early_lock_atr_multiplier']}x ATR)\n"
                         msg += f"   └─ Threshold: {vtm_status.get('current_early_lock_threshold_pct', 0):.2%}\n"
-                    
+
                     if vtm_status.get("runner_trail_atr_multiplier") is not None:
                         msg += f"🏃 Runner Trail: Dynamic ({vtm_status['runner_trail_atr_multiplier']}x ATR)\n"
                         msg += f"   └─ Current Trail: {vtm_status.get('current_runner_trail_pct', 0):.2%}\n"
@@ -2032,7 +2032,7 @@ class TradingTelegramBot:
                 for asset_name, asset_cfg in self.trading_bot.config["assets"].items():
                     if not asset_cfg.get("enabled", False):
                         continue
-                    
+
                     exchange = asset_cfg.get("exchange", "binance")
                     symbol = self.trading_bot._resolve_symbol(asset_name)
 
@@ -2041,7 +2041,7 @@ class TradingTelegramBot:
                         if exchange == "binance"
                         else self.trading_bot.mt5_handler
                     )
-                    
+
                     if handler and symbol:
                         price = handler.get_current_price(symbol=symbol)
                         if price:
@@ -3087,24 +3087,24 @@ class TradingTelegramBot:
             df_4h = self.trading_bot._fetch_4h_data(asset)
             aggregator = self.trading_bot.aggregators.get(asset)
             signal, details = aggregator.get_aggregated_signal(df_15min)
-            
+
             asset_cfg = self.trading_bot.config['assets'].get(asset, {})
             exchange = asset_cfg.get('exchange', 'binance')
             symbol = self.trading_bot._resolve_symbol(asset)
-            
+
             handler = (
                 self.trading_bot.binance_handler
                 if exchange == "binance"
                 else self.trading_bot.mt5_handler
             )
-            
+
             current_price = None
             if handler and symbol:
                 current_price = handler.get_current_price(symbol=symbol)
-            
+
             if current_price is None:
                 current_price = df_15min["close"].iloc[-1]
-                
+
             return df_15min, df_4h, signal, details, current_price
 
         try:
@@ -3203,6 +3203,10 @@ class TradingTelegramBot:
                 if _os_c.path.exists(_p):
                     with open(_p, "rb") as _fh:
                         await update.message.reply_photo(photo=_fh, caption="%s -- proof card" % _a)
+                    _pc = _os_c.path.join("logs", "charts", "%s_combined.png" % _a)      # B13 item 9B: on demand too
+                    if _os_c.path.exists(_pc):
+                        with open(_pc, "rb") as _fh2:
+                            await update.message.reply_photo(photo=_fh2, caption="%s -- combined chart" % _a)
                 else:
                     _missing.append(_a)
             if _missing:           # rule 13: say which markets have no card, never skip them silently
@@ -3342,7 +3346,7 @@ class TradingTelegramBot:
                         price = None
                         if handler and symbol:
                             price = handler.get_current_price(symbol=symbol)
-                        
+
                         if price is None:
                             price = df_15["close"].iloc[-1]
 
@@ -3418,15 +3422,15 @@ class TradingTelegramBot:
         """Send signal statistics (for callback)"""
         try:
             msg = "📊 *Signal Statistics*\n\n"
-            
+
             for asset in list(self.trading_bot.config["assets"].keys()):
                 if not self.trading_bot.config["assets"][asset].get("enabled", False):
                     continue
-                
+
                 stats = self.signal_monitor.get_signal_statistics(asset)
                 if not stats:
                     continue
-                    
+
                 emoji = "₿" if asset == "BTC" else "🥇" if "GOLD" in asset.upper() else "📈"
                 msg += f"*{emoji} {asset}*\n"
                 msg += f"Total: {stats['total_signals']}\n"
@@ -3529,7 +3533,7 @@ class TradingTelegramBot:
         success_count = 0
 
         for admin_id in self.admin_ids:
-            max_retries = 3
+            max_retries = 5   # B13 item 26 (Desire 5 Oct): ride out Telegram's ~1-minute 'Bad Gateway' spells
 
             for attempt in range(max_retries):
                 try:
@@ -3568,7 +3572,7 @@ class TradingTelegramBot:
                             logger.info("[TELEGRAM] Reconnected after network error")
                         except:
                             pass
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(min(30.0, 5.0 * 2 ** attempt))   # B13 item 26: 5, 10, 20, 30 s
 
                 except RuntimeError as e:
                     if "Event loop is closed" in str(e):
@@ -3588,6 +3592,20 @@ class TradingTelegramBot:
             )
         else:
             logger.error("[TELEGRAM] Failed to send to any admin")
+
+    def _b13_usdjpy(self):
+        """B13 item 18 (Desire 5 Oct): a live USDJPY price from MT5 (the bot's own connection), to show yen sums in
+        dollars. None if MT5 can't give one -- the card then says the sums are in yen."""
+        try:
+            import MetaTrader5 as _mt5
+            for _sym in ("USDJPYm", "USDJPY"):
+                if _mt5.symbol_select(_sym, True):
+                    _t = _mt5.symbol_info_tick(_sym)
+                    if _t and _t.bid and _t.ask:
+                        return (float(_t.bid) + float(_t.ask)) / 2.0
+        except Exception:
+            pass
+        return None
 
     async def notify_trade_opened(
         self,
@@ -3654,6 +3672,14 @@ class TradingTelegramBot:
                 tp_distance_pct = 0
                 tp_profit_usd = 0
 
+            # B13 item 18 (Desire 5 Oct): JPY-quoted markets -- the sums above are in yen; show them in dollars
+            _b13_yen_note = ""
+            if str(asset).upper() in ("JP225", "EURJPY", "AUDJPY"):
+                _usdjpy = self._b13_usdjpy()
+                if _usdjpy:
+                    size, sl_risk_usd, tp_profit_usd = size / _usdjpy, sl_risk_usd / _usdjpy, tp_profit_usd / _usdjpy
+                else:
+                    _b13_yen_note = " (YEN -- no USDJPY price to convert)"
             # B12.1 (Desire 30 Sep, decision 55): the REAL share of the account at risk (dollars / live equity)
             try:
                 _ns_eq = float(getattr(getattr(self.trading_bot, "portfolio_manager", None), "equity", 0) or 0)
@@ -3673,7 +3699,7 @@ class TradingTelegramBot:
             if sl and sl > 0:
                 msg += (
                     f"🛑 Stop Loss: {self._fmt_px(sl)}\n"
-                    f"   └─ Risk: ${sl_risk_usd:.2f}{_ns_real} (stop {sl_distance_pct:.2f}% from entry)\n"
+                    f"   └─ Risk: ${sl_risk_usd:.2f}{_ns_real}{_b13_yen_note} (stop {sl_distance_pct:.2f}% from entry)\n"
                 )
             else:
                 msg += "🛑 Stop Loss: VTM Dynamic\n"
@@ -3684,6 +3710,8 @@ class TradingTelegramBot:
                 "atr_capped": "📐 ATR cap (anchor too far)",
                 "atr":        "📐 ATR baseline",
             }
+            _stop_icons["ns_tested"] = "Tested stop (line - 0.3 moves)"            # B13 item 11
+            _stop_icons["ns_pkg"] = "Package stop (behind the push)"                # B13 item 11
             _stop_label = _stop_icons.get(stop_type or "atr", "📐 ATR baseline")
             # Replace underscores in entry_type names (e.g. TREND_FOLLOWING,
             # MR_PULLBACK) — Telegram Markdown treats _ as italic delimiter
@@ -3707,7 +3735,7 @@ class TradingTelegramBot:
                     tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
                 )
                 msg += f"📈 Risk/Reward: 1:{rr_ratio:.2f}\n\n"
-            
+
             # TARGET-1 T5: this banner used to fire unconditionally whenever
             # VTM was active, regardless of whether the exchange SL push
             # actually happened -- on GBPAUD it was sent one second after
@@ -4350,10 +4378,10 @@ class TradingTelegramBot:
         elif signal == -1:
             signal_icon = "\U0001f534 SELL"
         else:
-            signal_icon = "\u26aa HOLD"
+            signal_icon = "⚪ HOLD"
 
         # Quality indicator
-        quality_icon = "\u2605" if quality >= 0.65 else "\u2022"
+        quality_icon = "★" if quality >= 0.65 else "•"
 
         entry = (
             f"  {timestamp} | {signal_icon} | {self._fmt_px(price)}\n"

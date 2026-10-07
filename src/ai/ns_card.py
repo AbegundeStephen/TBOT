@@ -12,7 +12,7 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 BRAIN_COL = {"MAIN_UP": "#2e7d32", "NATURAL_RETRACEMENT": "#c0ca33", "SECONDARY_RETRACEMENT": "#ef6c00",
              "MAIN_DOWN": "#c62828", "NATURAL_REBOUND": "#4dd0e1", "SECONDARY_REBOUND": "#8e24aa"}
-STYLE = {"B": "break", "E": "retest", "E2": "pause-then-turn"}
+STYLE = {"B": "break", "E": "retest", "E2": "pause-then-turn", "PKG": "package"}   # B13 item 7: package entries
 STAGE = {0: "waiting for a CLEAR 4H close past R2", 1: "broken -- waiting for the retest", 2: "retested -- waiting for the trigger"}
 _LSM = {}
 
@@ -136,7 +136,25 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
         e, stop = float(f.get("ns_close")), float(f.get("ns_stop"))
         tgt = f.get("ns_target")
         tgt = None if tgt in (None, "None") else float(tgt)
-        xs = ctr(te)
+        _pkg = f.get("ns_entry") == "PKG"                       # B13 item 7: a package entry is a 30m close
+        if _pkg:
+            ctr_e = lambda t_close: t_close - pd.Timedelta(minutes=15)
+        else:
+            ctr_e = ctr
+        xs = ctr_e(te)
+        if _pkg:
+            # the peak (the trigger the push had to clear) and the old high/low it waited past -- dashed, like wick lines
+            _ts0 = T(f.get("pkg_signal_t")) or te
+            for _lv, _lab, _col in ((f.get("brc_h2"), " P peak (trigger)", "#6a1b9a"),
+                                    (f.get("pkg_bigger"), " W old %s (wick)" % ("high" if d == 1 else "low"), "#ef6c00")):
+                if _lv not in (None, "None"):
+                    ax.plot([ctr(_ts0), x_end], [float(_lv), float(_lv)], color=_col, lw=1.4, ls=(0, (6, 4)), zorder=4)
+                    ax.text(x_end, float(_lv), _lab, color=_col, fontsize=10, va="center")
+            if f.get("pkg_signal_close") not in (None, "None") and T(f.get("pkg_signal_t")) is not None:
+                ax.plot([ctr(T(f.get("pkg_signal_t")))], [float(f["pkg_signal_close"])], "o", ms=16, mfc="white",
+                        mec="#555555", mew=1.8, zorder=6)
+                ax.text(ctr(T(f.get("pkg_signal_t"))), float(f["pkg_signal_close"]), "e", color="#555555", fontsize=10,
+                        fontweight="bold", ha="center", va="center", zorder=7)
         ax.plot([xs, x_end], [stop, stop], color="#e57373", lw=1.8, ls="--")
         ax.text(x_end, stop, " S stop", color="#c62828", fontsize=10, va="center")
         if tgt is not None:
@@ -147,15 +165,17 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
             marks = [(te, e, "B/E", "black"), (tt, f.get("ns_touch_px"), "R", "#6a1b9a")]
         for tm, px, lab, col in marks:
             if tm is not None and px not in (None, "None"):
-                ax.plot([ctr(tm)], [float(px)], "o", ms=24 if "/" in lab else 20, mfc="white", mec=col, mew=2.2, zorder=6)
-                ax.text(ctr(tm), float(px), lab, color=col, fontsize=11, fontweight="bold", ha="center", va="center", zorder=7)
+                _c = ctr_e if (lab == "E" and tm == te) else ctr
+                ax.plot([_c(tm)], [float(px)], "o", ms=24 if "/" in lab else 20, mfc="white", mec=col, mew=2.2, zorder=6)
+                ax.text(_c(tm), float(px), lab, color=col, fontsize=11, fontweight="bold", ha="center", va="center", zorder=7)
     ax.set_xlim(start, now + pd.Timedelta(hours=10))
     ax.grid(alpha=0.25)
     ax.tick_params(labelbottom=False)
     side = "LONG" if d == 1 else "SHORT"
     if what == "proof":
-        title = "%s %s  -  %s entry  -  %s   (entry candle closed %s UTC)" % (
-            asset, side, STYLE.get(f.get("ns_entry"), f.get("ns_entry")), f.get("ns_kind_raw", ""), str(te)[:16])
+        title = "%s %s  -  %s entry  -  %s   (%sentry candle closed %s UTC)" % (
+            asset, side, STYLE.get(f.get("ns_entry"), f.get("ns_entry")), f.get("ns_kind_raw", ""),
+            "30m " if f.get("ns_entry") == "PKG" else "1H ", str(te)[:16])
     elif what == "setup":
         title = "%s  -  watching setup #%s: %s %s  -  %s" % (asset, obj.get("id"), side, obj.get("kind", ""),
                                                              STAGE.get(int(obj.get("stage", 0)), ""))
@@ -180,7 +200,8 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
     if what == "proof":
         rr = abs((tgt if tgt is not None else e) - e) / max(abs(e - stop), 1e-12)
         bpx, ba4 = f.get("ns_b_px"), f.get("ns_b_atr4")
-        lines = ["PROOF CARD - %s %s  -  %s entry  -  %s" % (asset, side, f.get("ns_entry"), str(f.get("ns_kind_raw", "")).upper()), "",
+        lines = ["PROOF CARD - %s %s  -  %s entry  -  %s" % (asset, side, STYLE.get(f.get("ns_entry"), f.get("ns_entry")),
+                                                          str(f.get("ns_kind_raw", "")).upper()), "",
                  "R2  %.6g = 4H swing CLOSE, zone to wick %.6g" % (r2, edge), "    (setup born %s UTC)" % str(conf)[:16],
                  "R1  %.6g = kill line" % r1, ""]
         if tb is not None and bpx not in (None, "None"):
@@ -191,14 +212,25 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
             lines.append("           %s the wick" % ("CLEARED" if d * (float(bpx) - edge) > 0 else "inside"))
         lines.append(("R  retest  %s  %.6g" % (str(tt)[:16], float(f["ns_touch_px"]))) if tt is not None and f.get("ns_touch_px") not in (None, "None")
                      else "R  retest  - (break entry: no retest needed)" if f.get("ns_entry") == "B" else "R  retest  -")
-        lines += ["E  entry   %s  close %.6g" % (str(te)[:16], e), "",
+        if f.get("ns_entry") == "PKG":                                    # B13 item 7: say plainly what the package did
+            _far = f.get("pkg_route") == "far"
+            _g6 = (lambda _v: ("%.6g" % float(_v)) if _v not in (None, "None", "") else "-")
+            lines += ["e  signal  %s  1H close %s" % (str(f.get("pkg_signal_t"))[:16], _g6(f.get("pkg_signal_close"))),
+                      "PACKAGE  %s, waited %sh: %s" % ("FAR entry" if _far else "old %s just ahead" % ("high" if d == 1 else "low"),
+                                                      f.get("pkg_wait_h"), f.get("pkg_how")),
+                      ("           stop behind the last 30m higher low (far-entry rule)" if _far else
+                       "           the closes had to clear %s (W)" % _g6(f.get("pkg_bigger"))),
+                      "           bigger timeframes: %s" % (f.get("pkg_majority") or "-")]
+        lines += ["%s  entry   %s  %sclose %.6g" % ("E", str(te)[:16], "30m " if f.get("ns_entry") == "PKG" else "1H ", e), "",
                   "S  stop    %.6g" % stop,
                   "T  target  %s   reward:risk %.2f" % (("%.6g" % tgt) if tgt is not None else "runner (trailed)", rr), "",
                   risk_text or "REAL RISK  (not known yet -- drawn before the order)", "",
                   "labels: A+ %s" % (", ".join(f.get("ns_aplus") or []) or "-"),
                   "        watch %s" % (", ".join(f.get("ns_watch") or []) or "-"),
                   "brains at entry: 1H %s | 4H %s" % (f.get("ns_brain_1h") or "-", f.get("ns_brain_4h") or "-"),
-                  "checks: %s" % (f.get("ns_checks") or "-")]
+                  "checks: %s" % (f.get("ns_checks") or "-"),
+                  "diagonal: %s" % (("agrees (broke %s)" % str(f.get("ns_diag_break_t"))[:16]) if f.get("ns_diag_agrees")
+                                    else "none in the 24 h before")]          # B13 items 11/31: the tag on the card
     elif what == "setup":
         lines = ["SETUP #%s - %s %s" % (obj.get("id"), side, str(obj.get("kind", "")).upper()), "",
                  "R2  %.6g = the line to break (4H swing CLOSE)" % r2, "    zone to wick %.6g" % edge,
@@ -232,8 +264,17 @@ def write_card(asset, df1, cs, out_dir=os.path.join("logs", "charts"), now=None,
             return None
         os.makedirs(out_dir, exist_ok=True)
         what, obj = pick(cs, now=now)
-        return render(str(asset).upper(), df1, what, obj, os.path.join(out_dir, "%s.png" % str(asset).upper()),
-                      now=now, margin_atr=margin_atr, risk_text=risk_text)
+        out_png = os.path.join(out_dir, "%s.png" % str(asset).upper())
+        # B13 item 17 (Desire 5 Oct): redraw only when something on the card changed -- a new candle, a new proof or
+        # setup stage, or a new risk text. Drawing every market every cycle was slowing the whole cycle.
+        _sig = "|".join(str(x) for x in (what, (obj or {}).get("id"), (obj or {}).get("stage"),
+                                         ((obj or {}).get("fields") or {}).get("ns_candle"), df1.index[-1], risk_text))
+        _memo = globals().setdefault("_B13_LAST_SIG", {})
+        if _memo.get(str(asset).upper()) == _sig and os.path.exists(out_png):
+            return out_png
+        res = render(str(asset).upper(), df1, what, obj, out_png, now=now, margin_atr=margin_atr, risk_text=risk_text)
+        _memo[str(asset).upper()] = _sig
+        return res
     except Exception as e:
         logger.warning("[NS-CARD] %s: card not drawn: %s", asset, e)
         return None

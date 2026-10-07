@@ -3686,6 +3686,18 @@ class CompositeStateBuilder:
                     else:
                         _keep.append(_s)
                 _store[asset] = _keep
+            # B13 item 10 (Desire 5 Oct): a proof can only ever trade once. The new engine keeps this hour's proofs in
+            # its own state ('proofs_live') and hands them back every cycle until the next candle -- remove the spent one
+            # there too (before B13 this search only looked at the old stores above and found nothing to mark).
+            _nst = (getattr(self, "_ns_state", None) or {}).get(asset)
+            if isinstance(_nst, dict) and _nst.get("proofs_live"):
+                _live_keep = []
+                for _p in _nst["proofs_live"]:
+                    if int(_p.get("dir", 0) or 0) == _d and abs(float(_p.get("ref") or 0.0) - float(ref)) <= _tol:
+                        _killed.append(("NS", float(_p.get("ref") or 0.0)))
+                    else:
+                        _live_keep.append(_p)
+                _nst["proofs_live"] = _live_keep
             if _killed:
                 logger.info(
                     "[PROOF-SPENT] %s: killed %d live setup(s) at ref=%.5g after a live "

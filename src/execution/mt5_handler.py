@@ -250,11 +250,11 @@ class MT5ExecutionHandler:
             if terminal_info is None:
                 logger.error("[MT5] Terminal not responsive")
                 return False
-            
+
             if not terminal_info.connected:
                 logger.warning("[MT5] Terminal disconnected")
                 return False
-                
+
             return True
         except Exception as e:
             logger.error(f"[MT5] Connection check failed: {e}")
@@ -320,7 +320,7 @@ class MT5ExecutionHandler:
                 # Handle suffixes like 'm'
                 base_symbol = symbol.replace("m", "")
                 mock_price = mock_prices.get(base_symbol, 100.0)
-                
+
                 price_cache.set(symbol, mock_price)
                 logger.info(
                     f"[CACHE] Price cache updated with MOCK price (Paper Mode): {mock_price} for {symbol}"
@@ -457,7 +457,7 @@ class MT5ExecutionHandler:
             account_info = mt5.account_info()
             if account_info:
                 margin_free = account_info.margin_free
-                
+
                 # ✅ T38: Set sanity floor to $12.0
                 # Real margin check happens below in _validate_margin()
                 margin_required = 12.0
@@ -563,7 +563,7 @@ class MT5ExecutionHandler:
                 )
                 actual_usd = position_size_usd
                 risk_pct = -1  # Indicate bypass
-                
+
                 if signal_details is None:
                     signal_details = {}
                 signal_details["small_account_protocol_active"] = True
@@ -607,7 +607,7 @@ class MT5ExecutionHandler:
 
                 # Calculate initial stop loss for validation
                 risk_config = asset_cfg.get("risk", {})
-                
+
                 # ATR-based adaptive stop loss distance
                 # Phase 1.1: size against the SAME effective ATR multiplier the
                 # VTM will actually place (regime floors included), not the raw
@@ -661,7 +661,8 @@ class MT5ExecutionHandler:
                     stop_loss=initial_stop,
                     risk_config=risk_config,
                     trade_type=trade_type,
-                    atr_fast=signal_details.get("atr_fast") if signal_details else None
+                    atr_fast=signal_details.get("atr_fast") if signal_details else None,
+                    ns_trade=bool(((signal_details or {}).get("composite_state") or {}).get("ns_exit")),   # B13 item 12
                 )
 
                 if not is_valid:
@@ -947,6 +948,9 @@ class MT5ExecutionHandler:
                 _lim_b10 = float(_pc_b10.get("max_entry_distance_atr", 2.5))
                 _em_b10 = (signal_details or {}).get("entry_measure") or {}
                 _d_b10 = _em_b10.get("entry_distance_atr")
+                if str(_em_b10.get("ns_entry") or "") == "PKG":      # B13 item 30 (Desire 5 Oct)
+                    logger.info(f"[FRESHNESS] {asset} {side.upper()}: package entry -- exempt (its own far-entry stop rules apply)")
+                    _lim_b10 = 0.0
                 if _lim_b10 > 0:
                     if _d_b10 is None or float(_d_b10) < 0:
                         logger.warning(f"[FRESHNESS] {asset} {side.upper()}: not measured (no entry distance) -- sending")
@@ -990,7 +994,7 @@ class MT5ExecutionHandler:
             except Exception as _b8_e:
                 logger.error(f"[PRESEND] {asset}: pre-send check failed ({_b8_e}) -- sending as before")
             requested_price = current_price
-            
+
             mt5_ticket, execution_price = self._execute_mt5_order(
                 symbol, side, volume_lots, asset, trade_type, symbol_info
             )
@@ -1045,27 +1049,19 @@ class MT5ExecutionHandler:
             )
 
             if success:
-                # ✅ Standardized Log
-                log_trade_event("ENTRY", {
-                    "symbol": symbol,
-                    "asset": asset,
-                    "side": side,
-                    "price": execution_price,
-                    "size": volume_lots,
-                    "trade_type": trade_type,
-                    "position_id": str(mt5_ticket),
-                    "record_source": "broker",
-                    "episode_id": (signal_details or {}).get("episode_id"),   # DATA-1 ITEM 1B
-                })
+                # B13 item 5 (Desire 5 Oct): ONE entry record per trade. The portfolio manager writes it, with the
+                # position id its EXIT record uses (trade_xray pairs them by that id). The broker-side ENTRY record
+                # that used to be written here was the duplicate (MT5 ticket as id, never paired).
+                logger.debug(f"[TRADE-EVENT] {asset}: entry recorded by the portfolio manager (MT5 ticket {mt5_ticket})")
 
                 # ✅ Update last trade time for cooldown
                 self.last_trade_time[asset] = time.time()
                 self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
-                
+
                 # ✅ Update last trade time for cooldown
                 self.last_trade_time[asset] = time.time()
                 self.trade_timestamps_hourly.append(time.time()) # Record for hourly limit
-                
+
                 logger.info(
                     f"\n{'='*80}\n"
                     f"✅ {asset} {side.upper()} POSITION OPENED\n"
@@ -1438,21 +1434,21 @@ class MT5ExecutionHandler:
         """Helper to perform pre-flight margin check."""
         if self.mode.lower() == "paper":
             return True
-            
+
         # ✅ NEW: Bypass margin check for Small Account Protocol
         if small_account_active:
             logger.info("[MARGIN] 🛡️ Small Account Protocol active: Bypassing margin validation for MIN LOT.")
             return True
-            
+
         try:
             account_info = mt5.account_info()
             if not account_info:
                 return True
 
             # ✅ Use broker's native margin calculation (handles leverage/currency automatically)
-            order_type = mt5.ORDER_TYPE_BUY 
+            order_type = mt5.ORDER_TYPE_BUY
             broker_margin = mt5.order_calc_margin(order_type, symbol_info.name, volume_lots, current_price)
-            
+
             if broker_margin is None:
                 logger.warning(f"[MARGIN] Broker calculation failed for {symbol_info.name}, using fallback.")
                 leverage = account_info.leverage if account_info.leverage > 0 else 100
@@ -1462,20 +1458,20 @@ class MT5ExecutionHandler:
                 estimated_margin = broker_margin
 
             estimated_margin *= 1.10  # 10% safety buffer
-            
+
             logger.info(
                 f"[MARGIN CHECK]\n"
                 f"  Free Margin:      ${account_info.margin_free:,.2f}\n"
                 f"  Required Margin:  ${estimated_margin:,.2f}\n"
                 f"  Margin Level:     {account_info.margin_level:.2f}%"
             )
-            
+
             if estimated_margin > account_info.margin_free:
                 logger.error(
                     f"[MARGIN] ❌ Insufficient margin. Available: ${account_info.margin_free:,.2f}, Required: ${estimated_margin:,.2f}"
                 )
                 return False
-                
+
         except Exception as e:
             logger.error(f"[MARGIN] Pre-flight error: {e}")
         return True
@@ -1667,13 +1663,13 @@ class MT5ExecutionHandler:
         trade_type = "TREND"
         if signal_details:
             trade_type = signal_details.get("trade_type", "TREND")
-            
+
         trade_key = f"{asset_name}_{trade_type}_{signal}"
-        
+
         if self.execution_lock.get(trade_key, False):
             logger.warning(f"[LOCK] Duplicate execution blocked for {trade_key}")
             return False
-            
+
         self.execution_lock[trade_key] = True
 
         try:
@@ -2399,7 +2395,7 @@ class MT5ExecutionHandler:
                         current_price, df_4h=df_4h, composite_state=composite_state,
                         judge_scores=_judge_scores,
                     )
-                    
+
                     _sl_after = position.trade_manager.current_stop_loss
                     _tp_after = position.trade_manager.current_take_profit
 
@@ -2411,7 +2407,7 @@ class MT5ExecutionHandler:
                     _asset_exchange = self.config.get("assets", {}).get(
                         asset_name, {}
                     ).get("exchange", "mt5")
-                    
+
                     if not _is_closing and position.mt5_ticket and _asset_exchange == "mt5":
                         # Always resolve via _resolve_symbol so that dual-exchange
                         # assets like BTC use their MT5 symbol ("BTCUSDm") instead of
@@ -2459,7 +2455,7 @@ class MT5ExecutionHandler:
                         if isinstance(exit_signal, dict) and "action" in exit_signal:
                             action = exit_signal["action"]
                             logger.info(f"[VTM LOOP] {position.position_id} triggered action: {action.upper()}")
-                            
+
                             # Add to pyramid requests to be returned to main loop
                             pyramid_requests.append({
                                 "asset": asset_name,
@@ -2482,7 +2478,7 @@ class MT5ExecutionHandler:
                             reason=f"VTM_{exit_reason_str}",
                         )
                         positions_closed = True
-            
+
             return {"closed": positions_closed, "pyramid_requests": pyramid_requests}
 
         except Exception as e:
@@ -2626,7 +2622,7 @@ class MT5ExecutionHandler:
 
         try:
             import MetaTrader5 as mt5
-            
+
             symbol_info = mt5.symbol_info(symbol)
             if symbol_info is None:
                 logger.warning(f"[SYNC] Symbol info for {symbol} unavailable; skipping.")

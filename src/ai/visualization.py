@@ -53,8 +53,8 @@ class AIVisualizationGenerator:
         self.sniper = None  # PAT-4: pattern module removed
         self.ai_validator = ai_validator
 
-        # Set matplotlib style for dark theme
-        plt.style.use("dark_background")
+        # B13 item 9 (Desire 1 Oct): white charts everywhere -- the dark theme is retired
+        plt.style.use("default")
 
         logger.info("[VIZ] AI Visualization Generator initialized")
 
@@ -300,8 +300,8 @@ class AIVisualizationGenerator:
                 low_wick = min(latest['open'], latest['close']) - latest['low']
 
                 if (high_wick > 2.0 * body) or (low_wick > 2.0 * body):
-                    ax.scatter(len(df_plot)-1, latest['high'] if high_wick > low_wick else latest['low'], 
-                               color="orange", s=150, facecolors='none', edgecolors='orange', 
+                    ax.scatter(len(df_plot)-1, latest['high'] if high_wick > low_wick else latest['low'],
+                               color="orange", s=150, facecolors='none', edgecolors='orange',
                                linewidth=2, label="Liquidity Sweep")
 
             # Add EMAs if available - try multiple common column naming conventions

@@ -47,7 +47,7 @@ def find_resistance_levels(
     """Find significant resistance/support levels using adaptive tolerance."""
     lookback = min(lookback, len(close))
     levels = []
-    
+
     # Default tolerance if none provided (Fallback to 0.5% of price if ATR not provided)
     if tolerance is None:
         tolerance = current_price * 0.005
@@ -198,10 +198,10 @@ def calculate_hybrid_targets(
 class VeteranTradeManager:
     """
     ✨ REFACTORED: Strategic/Tactical Risk Architecture
-    
+
     TACTICAL ROLE: Manages HOW to execute trades (stops, targets, trailing)
     STRATEGIC ROLE: Portfolio Manager decides HOW MUCH to risk
-    
+
     KEY CHANGES:
     - Accepts risk configuration dictionary directly from config.json.
     - Validates trade economics before execution (pre-flight check).
@@ -216,6 +216,7 @@ class VeteranTradeManager:
         risk_config: dict,
         trade_type: str = "TREND",
         atr_fast: Optional[float] = None,
+        ns_trade: bool = False,      # B13 item 12 (Desire 5 Oct): a new-engine trade -- its own tested gates apply
     ) -> Tuple[bool, str]:
         """
         ✨ INSTITUTIONAL: Strict TREND validation with ATR-based economics.
@@ -244,7 +245,7 @@ class VeteranTradeManager:
 
             # ── Closest-target check (TP1 must clear half an ATR minimum) ──
             first_tp_dist = stop_distance * risk_multiples[0]
-            if first_tp_dist < (0.5 * atr_fast):
+            if not ns_trade and first_tp_dist < (0.5 * atr_fast):     # B13 item 12: skipped for new-engine trades
                 return False, (
                     f"TP1 too close to entry: ${first_tp_dist:,.2f} < 0.5×ATR (${0.5*atr_fast:,.2f})"
                 )
@@ -379,7 +380,7 @@ class VeteranTradeManager:
         self.atr_period = atr_period
         self.signal_details = signal_details or {}
         self.trade_type = trade_type
-        
+
         self.position_size = quantity
         self.local_free_margin = local_free_margin
         self.current_ask = current_ask
@@ -1014,24 +1015,24 @@ class VeteranTradeManager:
         except Exception as e:
             logger.error(f"[VTM] ATR error: {e}")
             return self.entry_price * 0.02
-        
+
     def check_promotion_to_runner(
-        self, 
+        self,
         current_price: float
     ) -> bool:
         if len(self.partials_hit) != 1 or self.runner_activated:
             return False
-        
+
         try:
             volume_ratio = 1.0
             if self.volume is not None and len(self.volume) > 20:
-                avg_vol = np.mean(self.volume[-21:-1]) 
+                avg_vol = np.mean(self.volume[-21:-1])
                 current_vol = self.volume[-1]
                 if avg_vol > 0:
                     volume_ratio = current_vol / avg_vol
-            
+
             volume_strong = volume_ratio > 1.5
-            
+
             candle_conviction = False
             if len(self.high) > 0 and len(self.low) > 0:
                 latest_high, latest_low = self.high[-1], self.low[-1]
@@ -1043,7 +1044,7 @@ class VeteranTradeManager:
                     else:
                         distance_from_low = (current_price - latest_low) / candle_range
                         candle_conviction = distance_from_low < 0.20
-            
+
             if volume_strong or candle_conviction:
                 logger.info("\n" + "=" * 70 + "\n🚀 TRADE PROMOTION TRIGGERED\n" + "=" * 70)
                 self.runner_activated = True
@@ -1054,7 +1055,7 @@ class VeteranTradeManager:
             else:
                 # Do not modify SL if promotion fails
                 return False
-        
+
         except Exception as e:
             logger.error(f"[VTM] Promotion check error: {e}")
             return False
@@ -1420,12 +1421,12 @@ class VeteranTradeManager:
             if self.local_free_margin > 0:
                 notional_value = self.position_size * self.entry_price
                 max_notional = 0.0
-                
+
                 if self.asset_category == "CRYPTO":
                     max_notional = self.local_free_margin * 3.0
                 elif self.asset_category == "FOREX":
                     max_notional = self.local_free_margin * 20.0
-                
+
                 if notional_value > max_notional and max_notional > 0:
                     logger.info(f"[VTM] ⚠️ Leverage Ceiling: Notional ${notional_value:,.2f} > Max ${max_notional:,.2f}. Scaling down.")
                     self.position_size = max_notional / self.entry_price
@@ -1682,7 +1683,7 @@ class VeteranTradeManager:
                     spread = abs(self.current_ask - self.current_bid)
                     calculated_sl_dist = abs(self.entry_price - final_sl)
                     final_sl_distance = max(calculated_sl_dist, 3.0 * spread)
-                    
+
                     if final_sl_distance > calculated_sl_dist:
                         logger.info(f"[VTM] ↔️ Spread Floor: SL distance expanded to {final_sl_distance:.4f} (3x spread)")
                         final_sl = self.entry_price - final_sl_distance if self.side == "long" else self.entry_price + final_sl_distance
@@ -2089,7 +2090,7 @@ class VeteranTradeManager:
                 logger.warning(f"[VTM] Trade aborted: Final size {final_size} below minimum lot {min_lot} for {self.asset}.")
                 # We raise an exception here to signal the manager to abort trade creation
                 raise ValueError(f"Size {final_size} below min {min_lot} for {self.asset}")
-            
+
             self.position_size = final_size
 
             # B4 P0a/P0c: the ONE shared gauntlet, for both REVERSION and
@@ -2174,13 +2175,13 @@ class VeteranTradeManager:
         try:
             self.high, self.low, self.close = np.append(self.high, new_high), np.append(self.low, new_low), np.append(self.close, new_close)
             # ✨ MEMORY MANAGEMENT: Limit to 500 candles (Safe for 200 EMA + buffer)
-            if len(self.close) > 500: 
+            if len(self.close) > 500:
                 self.high, self.low, self.close = self.high[-500:], self.low[-500:], self.close[-500:]
-            
+
             self.bars_in_trade += 1
             if self.side == "long": self.highest_price_reached = max(self.highest_price_reached, new_high)
             else: self.lowest_price_reached = min(self.lowest_price_reached, new_low)
-            
+
             atr = self._calculate_atr() # Calculate ATR here
             return self.check_exit(new_close, atr) # Pass ATR to check_exit
         except Exception as e:
@@ -4081,7 +4082,7 @@ class VeteranTradeManager:
         pnl_pct = (current_price - self.entry_price) / self.entry_price * 100 if self.side == "long" else (self.entry_price - current_price) / self.entry_price * 100
         next_target_idx = len(self.partials_hit)
         next_target = self.take_profit_levels[next_target_idx] if next_target_idx < len(self.take_profit_levels) else None
-        
+
         # Directional distance — always negative = risk / downside remaining to SL
         # LONG: SL is below current → negative value (price must fall to hit SL)
         # SHORT: SL is above current → negative value (price must rise to hit SL)
@@ -4100,7 +4101,7 @@ class VeteranTradeManager:
                 distance_to_tp_pct = (current_price - next_target) / current_price * 100
         else:
             distance_to_tp_pct = 0
-        
+
         return {
             "entry_price": self.entry_price,
             "current_price": current_price,
