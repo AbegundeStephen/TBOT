@@ -42,6 +42,9 @@ ALLOW_ATR = 0.3
 FRESH_ATR = 2.5
 PKG_NEAR = 0.5                 # B13 (Desire 2 Oct): a bigger 4H line this close ahead (4H moves) -> the package
 PKG_AHEAD_DAYS = 60            # B13: bigger 4H lines are looked for this far back
+AHEAD_ON_WICKS = True          # B13 item 33 (Desire 6 Oct): the old high/low in front is judged on 4H WICKS (False = closes)
+DIAG_LIFE = 60                 # B13 item 32 (Desire 6 Oct): 4H candles a 3-touch diagonal is watched for a break
+DIAG_RECENT_H = 24             # B13 item 32: a diagonal broken the same way this many hours before the signal
 STOP_CAP_ATR = 5.0
 GATE_TARGET_ATR = 2.5          # the R:R screen the tests used, for every market
 WAIT_BREAK = timedelta(days=10)
@@ -139,6 +142,64 @@ def swings_4h(t4, hi4, lo4, c4):
         if c4[i] == win.min():
             out.append((conf, "L", float(c4[i]), float(lo4[i - K:i + K + 1].min())))
     out.sort(key=lambda x: (x[0], x[1]))
+    return out
+
+
+def wick_swings_4h(t4, hi4, lo4):
+    """B13 item 33 (Desire 6 Oct): every confirmed 4H swing by its WICK -- (confirmed_at, "H"|"L", wick, wick).
+    Used only to find the old high (low) just in front of a signal; the lines the bot trades stay on closes."""
+    out = []
+    n = len(hi4)
+    for i in range(K, n - K):
+        conf = t4[i + K]
+        if hi4[i] == hi4[i - K:i + K + 1].max():
+            out.append((conf, "H", float(hi4[i]), float(hi4[i])))
+        if lo4[i] == lo4[i - K:i + K + 1].min():
+            out.append((conf, "L", float(lo4[i]), float(lo4[i])))
+    out.sort(key=lambda x: (x[0], x[1]))
+    return out
+
+
+def diagonal_breaks_4h(t4, a4, c4):
+    """B13 items 31-32 (Desire 6 Oct): every break of a 3-touch diagonal on the 4H closes -- (direction, break time).
+    Exactly the finder the 16-month tests used: lines through consecutive swing closes (falling through highs for a
+    buy, rising through lows for a sell), valid once a third close touched it within half a 4H move (an earlier swing,
+    or a later close), watched for DIAG_LIFE 4H candles or until the next swing; a break is a 4H close at least a
+    quarter of a 4H move past it."""
+    n = len(c4)
+    piv = {"H": [], "L": []}
+    for i in range(K, n - K):
+        w = c4[i - K:i + K + 1]
+        if c4[i] == w.max():
+            piv["H"].append(i)
+        if c4[i] == w.min():
+            piv["L"].append(i)
+    out = []
+    for d, typ in ((1, "H"), (-1, "L")):
+        P = piv[typ]
+        for j in range(1, len(P)):
+            i1, i2 = P[j - 1], P[j]
+            v1, v2 = c4[i1], c4[i2]
+            if (d == 1 and not v2 < v1) or (d == -1 and not v2 > v1):
+                continue
+            slope = (v2 - v1) / (i2 - i1)
+            nxt = P[j + 1] if j + 1 < len(P) else n
+            start = i2 + K
+            end = min(n, start + DIAG_LIFE, nxt + K)
+            earlier = P[max(0, j - 5):j - 1]
+            vf = start if any(a4[p] == a4[p] and abs(c4[p] - (v1 + slope * (p - i1))) <= 0.5 * a4[p]
+                              for p in earlier) else None
+            for x in range(start, end):
+                lv = v1 + slope * (x - i1)
+                if vf is None:
+                    if x >= i2 + 3 and a4[x] == a4[x] and abs(c4[x] - lv) <= 0.5 * a4[x]:
+                        vf = x + 1
+                    continue
+                if x < vf or not (a4[x] == a4[x] and a4[x] > 0):
+                    continue
+                if d * (c4[x] - lv) >= 0.25 * a4[x]:
+                    out.append((d, t4[x]))
+                    break
     return out
 
 
@@ -296,6 +357,8 @@ class NSEngine:
         bar4 = {t: (h, l, c) for t, h, l, c in zip(t4, hi4, lo4, c4)}
         sw = swings_4h(t4, hi4, lo4, c4)
         self._sw4 = sw                               # B13: the package's 'bigger line just ahead' check (read-only)
+        self._sw4w = wick_swings_4h(t4, hi4, lo4)    # B13 item 33: the old high/low in front, judged on wicks
+        self._dbrk4 = diagonal_breaks_4h(t4, a4, c4) if self.variant is None else []   # B13 items 31-32
 
         n1 = len(t1)
         _rev = self._revised(st, t1, hi1, lo1, c1)
@@ -719,13 +782,27 @@ class NSEngine:
         # B13 (Desire 2 Oct): the package. A small line broken with a bigger 4H line just ahead, or a signal the
         # engine calls too far, is handed over instead of traded or retired. Everything else is unchanged.
         pkg_route = None
+        diag_agrees, diag_t = self._diag_recent(d, t)           # B13 items 31-32 (Desire 6 Oct)
         if self.variant is None and style == "E" and bool(cfg.get("package")) and not f_cont and not f_spike:
             if too_far:
                 pkg_route, why = "far", None
             elif why is None:
                 _lvl, _edg, _dist = self._bigger_ahead(d, e, t)
                 if _lvl is not None and _dist <= PKG_NEAR:
-                    pkg_route = "near"
+                    if diag_agrees:
+                        # B13 item 32: the diagonal confirmation rule -- a small line broken with an old high (low) just
+                        # ahead, but a 3-touch diagonal broke the same way in the last DIAG_RECENT_H hours: taken at once
+                        if emit:
+                            self._log.info("[DIAG-CONFIRM] %s: %s dir=%+d R2=%.5g entry=%.5g -- old 4H %s %.5g just ahead "
+                                           "(%.2f 4H moves), but a diagonal broke the same way at %s -- taken at once",
+                                           self.asset, style, d, r2, e, "high" if d == 1 else "low", _lvl, _dist, diag_t)
+                    else:
+                        pkg_route = "near"
+                elif emit:
+                    self._log.info("[PKG-ROUTE] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- taken at once (space to run)",
+                                   self.asset, style, d, r2, e,
+                                   ("nearest old 4H %s %.5g is %.2f 4H moves ahead" % ("high" if d == 1 else "low", _lvl, _dist))
+                                   if _lvl is not None else "no old 4H high/low ahead in the last %d days" % PKG_AHEAD_DAYS)
         room = None
         if self.variant is None and (cfg.get("quality_lines") or cfg.get("room_required")):
             room = self._room_ok(st, cfg, d, e, t, atr)          # B12.1 (decision 48): room ahead of the entry?
@@ -762,6 +839,7 @@ class NSEngine:
             "ns_r2": float(r2), "ns_edge": float(s["edge"]), "ns_r1": float(s["r1"]), "ns_atr1": float(atr),
             "ns_stop": float(stop), "ns_target": (float(target) if target else None), "ns_close": float(e),
             "ns_kind_raw": s["kind"], "ns_strength": float(strength), "ns_setup_id": int(s["id"]),
+            "ns_diag_agrees": bool(diag_agrees), "ns_diag_break_t": diag_t,      # B13 item 31: the tag
             "ns_conf": str(s["conf"]), "ns_candle": str(t),
             # display only -- the proof card (steps, checks, brains at entry); never read by trading code
             "ns_b_t": str(s.get("b_t")), "ns_b_px": s.get("b_px"), "ns_b_atr4": s.get("b_a4"), "ns_break_kind": s.get("break_kind"), "ns_checks": s.get("checks"), "ns_h2_t": str(s.get("h2_t")),
@@ -800,7 +878,8 @@ class NSEngine:
             st.setdefault("pkg", []).append(rec)
             self._log.info("[PKG-HANDOVER] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- the package takes over",
                            self.asset, tier, d, r2, e,
-                           ("bigger 4H line %.5g just ahead (%.2f 4H moves)" % (_lvl, _dist)) if pkg_route == "near"
+                           ("old 4H %s %.5g just ahead (%.2f 4H moves)" % ("high" if d == 1 else "low", _lvl, _dist))
+                           if pkg_route == "near"
                            else "%.2f moves past the line (too far to take at once)" % (d * (e - r2) / atr))
             return
         _hist = st.setdefault("proofs_hist", [])                   # display only: the chart's recent proofs
@@ -824,7 +903,7 @@ class NSEngine:
     def _bigger_ahead(self, d, e, t):
         """B13 (Desire 2 Oct): the nearest bigger 4H line ahead of price -- a 4H swing close from the last
         PKG_AHEAD_DAYS days, confirmed by time t -- and its distance in 4H moves. (None, None, None) when none."""
-        sw = getattr(self, "_sw4", None) or []
+        sw = (getattr(self, "_sw4w", None) if AHEAD_ON_WICKS else getattr(self, "_sw4", None)) or []   # B13 item 33
         t4, a4 = getattr(self, "_t4a4", (None, None))
         if not sw or t4 is None or len(t4) == 0:
             return None, None, None
@@ -842,6 +921,16 @@ class NSEngine:
         if best is None:
             return None, None, None
         return best[0], best[1], d * (best[0] - e) / a
+
+    def _diag_recent(self, d, t):
+        """B13 items 31-32 (Desire 6 Oct): did a 3-touch diagonal break the same way in the DIAG_RECENT_H hours before
+        t? Returns (True/False, the latest such break time or None)."""
+        tt, best = pd.Timestamp(t), None
+        for dd, tb in (getattr(self, "_dbrk4", None) or []):
+            tb = pd.Timestamp(tb)
+            if dd == d and tt - pd.Timedelta(hours=DIAG_RECENT_H) <= tb <= tt and (best is None or tb > best):
+                best = tb
+        return best is not None, (str(best) if best is not None else None)
 
     def _labels(self, st, i, d, e, atr, style, strength, s=None):
         """B12 (Desire 28 Sep, ruling 2): tracking labels -- never read by trading code.
@@ -895,8 +984,8 @@ class NSEngine:
                         if _brain("4H", 30, s["r2"]):
                             aplus.append("continuation breaks 4H brain level")          # 46 A (Test 8a, fixed brain)
                         raise StopIteration                    # the checks below are for reversals only
-                    if _brain("4H", 30, s["r1"]):
-                        aplus.append("reversal at 4H brain level")                      # 46 A (Test 7a, fixed brain)
+                    # B13 item 23 (Desire 5 Oct): "reversal at 4H brain level" retired -- the reversal rule already requires
+                    # it, so it was true on every reversal and told nothing
                     t4, hi4, lo4 = self._lab4
                     k4 = int(t4.searchsorted(tp, side="right")) - 1
                     if k4 >= 2 and _open_4h_gap_near(hi4, lo4, k4, d == 1, float(s["r1"]), hb):

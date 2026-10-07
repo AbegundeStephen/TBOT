@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 class HealthMonitor:
     def __init__(self):
         self.last_heartbeat = time.time()
-        self.error_count = 0
+        self.error_times = []        # B13 item 8 (Desire 5 Oct): errors decay -- only the last ERROR_WINDOW_S count
         self.start_time = time.time()
         # Part 1.8 (Brain Rebuild): expected minutes-per-cycle per asset,
         # used by check_cadence/check_decision_completeness below.
@@ -23,10 +23,18 @@ class HealthMonitor:
         """Update the last heartbeat timestamp"""
         self.last_heartbeat = time.time()
 
+    ERROR_WINDOW_S = 3600        # B13 item 8: an error counts for one hour, then drops off
+
+    @property
+    def error_count(self):
+        cut = time.time() - self.ERROR_WINDOW_S
+        self.error_times = [t for t in self.error_times if t >= cut]
+        return len(self.error_times)
+
     def record_error(self):
-        """Increment the error count"""
-        self.error_count += 1
-        logger.warning(f"[HEALTH] Error recorded. Current count: {self.error_count}")
+        """Record an error (B13 item 8: it counts for one hour, then drops off)"""
+        self.error_times.append(time.time())
+        logger.warning(f"[HEALTH] Error recorded. Errors in the last hour: {self.error_count}")
 
     def is_healthy(self):
         """
@@ -37,15 +45,15 @@ class HealthMonitor:
         now = time.time()
         heartbeat_ok = (now - self.last_heartbeat) < 60
         errors_ok = self.error_count < 10
-        
+
         healthy = heartbeat_ok and errors_ok
-        
+
         if not healthy:
             if not heartbeat_ok:
                 logger.error(f"[HEALTH] System Unhealthy: Heartbeat stale ({now - self.last_heartbeat:.1f}s)")
             if not errors_ok:
                 logger.error(f"[HEALTH] System Unhealthy: Too many errors ({self.error_count})")
-                
+
         return healthy
 
     def get_status(self):
