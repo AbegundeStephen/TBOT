@@ -3057,6 +3057,18 @@ class PortfolioManager:
                     if signal_details
                     else 0.0
                 )
+                # Dashboard closed-trades columns (Type/Regime/Mode) read the
+                # TASK 25 columns below, not the legacy regime/strategy ones --
+                # this call used to leave them all None, so every closed trade
+                # showed "—" regardless of what actually happened at entry.
+                trade_type_label = (
+                    signal_details.get("trade_type", "TREND")
+                    if signal_details
+                    else "TREND"
+                )
+                entry_aggregator_mode = (
+                    signal_details.get("aggregator_mode") if signal_details else None
+                )
 
                 # L1: surface Livermore state as top-level DB columns (was
                 # only ever reachable inside unindexed metadata JSON before).
@@ -3086,17 +3098,16 @@ class PortfolioManager:
                     take_profit=position.take_profit,
                     position_id=position.position_id,
                     exchange=self.config["assets"][asset].get("exchange", "binance"),
-                    strategy=(
-                        signal_details.get("trade_type", "TREND")
-                        if signal_details
-                        else "TREND"
-                    ),
+                    strategy=trade_type_label,
                     regime=regime,
                     signal_quality=quality,
                     confidence_score=confidence,
                     mt5_ticket=mt5_ticket,
                     binance_order_id=binance_order_id,
                     vtm_enabled=bool(position.trade_manager),
+                    regime_at_entry=regime,
+                    aggregator_mode=entry_aggregator_mode,
+                    trade_type_label=trade_type_label,
                     initial_stop_loss=(
                         position.trade_manager.initial_stop_loss
                         if position.trade_manager else None
