@@ -926,6 +926,44 @@ class MLStrategy(bt.Strategy):
                 self._exit_reason      = None
                 self._trade_entry_size = None
 
+    def _b12_council_advisory(self, signal, details, cs):
+        """Backtest-parity: live trading's council_suspended/council_advisory step
+        (main.py::_b12_council_advisory, B12 Desire 28 Sep / B13 Desire 2 Oct) lets
+        the NS-engine proof's own direction override a council HOLD -- under either
+        flag the council votes (recorded) but never blocks a proof. Confirmed via
+        config.json this IS the live decision rule today (council_suspended=True),
+        yet this backtest's entry logic only ever read the raw council signal and
+        never looked at the composite_state proofs it was already building --
+        meaning a council-mode backtest was silently measuring a council the live
+        bot stopped actually gating on months ago.
+
+        Simplification vs. live: skips the ledger-tracked -10R auto-revert that
+        only matters under council_advisory with council_suspended False (not
+        today's live setting), and skips the B6-2 per-proof re-scoring main.py
+        runs when 2+ proofs land on the same bar (it trades the proof matching
+        details['setup_ref'], falling back to the first, rather than the
+        highest-margin one).
+        """
+        try:
+            _proofs = list(getattr(cs, "proofs", None) or []) if cs is not None else []
+            if not _proofs:
+                return signal, details
+            _ref = details.get("setup_ref")
+            _p = next((p for p in _proofs if _ref is not None and p.get("ref") == _ref), _proofs[0])
+            details = dict(details)
+            details["council_vote"] = "PASS" if int(signal or 0) else "HOLD"
+            _dir = int(_p.get("dir", 0) or 0)
+            _pcfg = getattr(self.aggregator, "phase_config", {}) or {}
+            _advisory_active = bool(_pcfg.get("council_suspended", False)) or bool(_pcfg.get("council_advisory", False))
+            if int(signal or 0) or not _dir or not _advisory_active:
+                return signal, details
+            details["council_advisory_override"] = True
+            details["final_signal"] = _dir
+            return _dir, details
+        except Exception as e:
+            logger.debug(f"[COUNCIL-ADVISORY] backtest override failed: {e}")
+            return signal, details
+
     def next(self):
         self.next_call_count += 1
 
@@ -1055,6 +1093,12 @@ class MLStrategy(bt.Strategy):
                 is_bull_market  = governor_data.get("is_bull", True)      if governor_data else True,
                 governor_data   = governor_data,
             )
+
+            # B12/B13 (backtest parity): the council votes but, live, never blocks
+            # a proof under council_suspended/council_advisory -- see
+            # _b12_council_advisory above for why this was missing.
+            if self._agg_is_council and _cs is not None:
+                signal, details = self._b12_council_advisory(signal, details, _cs)
 
             # Non-Council mode: PerformanceWeightedAggregator's own details dict
             # already carries composite_state as a dict (signal_aggregator.py),
