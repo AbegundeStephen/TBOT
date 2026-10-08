@@ -429,6 +429,8 @@
         .badge-sell  { background: rgba(239,68,68,0.15);  color: var(--red2);   border: 1px solid rgba(239,68,68,0.3); }
         .badge-hold  { background: rgba(100,116,139,0.15); color: var(--muted2); border: 1px solid rgba(100,116,139,0.3); }
         .badge-shadow { background: rgba(139,92,246,0.15); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3); }
+        .badge-blocked { background: rgba(245,158,11,0.15); color: var(--yellow2); border: 1px solid rgba(245,158,11,0.3); }
+        .badge-paused  { background: rgba(100,116,139,0.15); color: var(--muted2); border: 1px solid rgba(100,116,139,0.3); }
 
         /* ── Empty state ───────────────────────── */
         .empty-state {
@@ -557,7 +559,7 @@
         /* ── Scorecard bars ────────────────────── */
         .score-row { padding: 8px 14px; border-bottom: 1px solid var(--border); }
         .score-row:last-child { border-bottom: none; }
-        .score-header { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 11px; }
+        .score-header { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 2px 8px; margin-bottom: 4px; font-size: 11px; }
         .score-name { color: var(--text); font-weight: 500; }
         .score-meta { color: var(--muted); font-family: var(--font-mono); }
         .score-bar-bg { background: var(--border); border-radius: 3px; height: 5px; }
@@ -1341,6 +1343,15 @@
                     <span class="shadow-title" style="color:var(--accent);">🔎 Market Scanner</span>
                     <span class="shadow-meta" id="scanner-meta">—</span>
                 </div>
+                <div class="stat-row" id="scanner-glance" style="padding:14px 14px 0;margin-bottom:0;">
+                    <div class="stat-card"><div class="stat-label">Waiting for break</div><div class="stat-value" id="scan-stage-0">—</div></div>
+                    <div class="stat-card"><div class="stat-label">Waiting for retest</div><div class="stat-value" id="scan-stage-1">—</div></div>
+                    <div class="stat-card accent"><div class="stat-label">Waiting for trigger</div><div class="stat-value" id="scan-stage-2">—</div></div>
+                    <div class="stat-card cyan"><div class="stat-label">Near a signal</div><div class="stat-value" id="scan-stat-near">—</div></div>
+                    <div class="stat-card yellow"><div class="stat-label">Blocked</div><div class="stat-value" id="scan-stat-blocked">—</div></div>
+                    <div class="stat-card green"><div class="stat-label">In a trade</div><div class="stat-value" id="scan-stat-trade">—</div></div>
+                </div>
+                <div id="scanner-urgent" style="padding:2px 14px 0;"></div>
                 <div style="display:flex;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-wrap:wrap;">
                     <button class="mode-btn active" data-scanfilter="all" onclick="setScannerFilter('all')">All <span id="scan-count-all">0</span></button>
                     <button class="mode-btn" data-scanfilter="near" onclick="setScannerFilter('near')">Near a signal <span id="scan-count-near">0</span></button>
@@ -3323,6 +3334,16 @@ function scannerFmtNum(v) {
     return v.toFixed(5).replace(/0+$/, '').replace(/\.$/, '');
 }
 
+// Setup confirmation age arrives as hours (server-computed, main.py) --
+// kept as a plain number rather than a timestamp specifically so the
+// dashboard never has to parse ns_engine's raw pandas Timestamp repr.
+function scannerFmtAge(hr) {
+    if (typeof hr !== 'number' || !isFinite(hr) || hr < 0) return null;
+    if (hr < 1) return Math.round(hr * 60) + 'm';
+    if (hr < 48) return Math.round(hr) + 'h';
+    return Math.round(hr / 24) + 'd';
+}
+
 // A market is "blocked" when its most recent decision is neither a routine
 // hold (no proof yet) nor an execution -- i.e. something actually stopped it
 // (a gate, a paused market, a reused proof).
@@ -3336,20 +3357,77 @@ function scannerIsNear(m) {
     return (m.setups || []).some(s => typeof s.dist_atr === 'number' && s.dist_atr <= SCANNER_NEAR_ATR);
 }
 
+// Short label for the blocked badge's tooltip -- the full recent-decision
+// reasoning, not just "blocked", so hovering actually explains why.
+function scannerBlockLabel(m) {
+    const top = (m.recent || [])[0];
+    if (!top) return m.paused ? 'paused (paper only)' : 'blocked';
+    return top.reasoning || top.stage || 'blocked';
+}
+
+function scannerToggleRecent(id) {
+    const box = document.getElementById(id);
+    const toggle = document.getElementById(id + '-toggle');
+    if (!box || !toggle) return;
+    const show = box.style.display === 'none';
+    box.style.display = show ? 'block' : 'none';
+    toggle.textContent = (show ? '▾' : '▸') + toggle.textContent.slice(1);
+}
+
 function renderScanner() {
     const el = document.getElementById('scanner-content');
+    const urgentEl = document.getElementById('scanner-urgent');
     const entries = Object.entries(scannerMarkets).sort((a, b) => a[0].localeCompare(b[0]));
 
+    // Glance strip + "closest to acting" ranking: computed once over every
+    // market's setups so the page answers "what's the system's overall
+    // state right now" and "what's about to happen" before any card is read.
     const counts = {all: entries.length, near: 0, trade: 0, blocked: 0};
-    for (const [, m] of entries) {
+    const stageCounts = {0: 0, 1: 0, 2: 0};
+    const urgent = [];
+    for (const [asset, m] of entries) {
         if (scannerIsNear(m)) counts.near++;
         if (m.has_position) counts.trade++;
         if (scannerIsBlocked(m)) counts.blocked++;
+        for (const s of (m.setups || [])) {
+            if (stageCounts[s.stage] !== undefined) stageCounts[s.stage]++;
+            if (typeof s.dist_atr === 'number') urgent.push({asset, m, s});
+        }
     }
     document.getElementById('scan-count-all').textContent = counts.all;
     document.getElementById('scan-count-near').textContent = counts.near;
     document.getElementById('scan-count-trade').textContent = counts.trade;
     document.getElementById('scan-count-blocked').textContent = counts.blocked;
+    document.getElementById('scan-stage-0').textContent = stageCounts[0];
+    document.getElementById('scan-stage-1').textContent = stageCounts[1];
+    document.getElementById('scan-stage-2').textContent = stageCounts[2];
+    document.getElementById('scan-stat-near').textContent = counts.near;
+    document.getElementById('scan-stat-blocked').textContent = counts.blocked;
+    document.getElementById('scan-stat-trade').textContent = counts.trade;
+
+    urgent.sort((a, b) => Math.abs(a.s.dist_atr) - Math.abs(b.s.dist_atr));
+    if (!urgent.length) {
+        urgentEl.innerHTML = '';
+    } else {
+        let uh = '<div class="card" style="padding:10px 14px;margin-bottom:12px;">' +
+                 '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px;">⏱ Closest to acting</div>' +
+                 '<div style="display:flex;flex-direction:column;gap:7px;">';
+        for (const {asset, m, s} of urgent.slice(0, 6)) {
+            const dirColor = s.d === 1 ? 'var(--green)' : 'var(--red)';
+            const dist = Math.abs(s.dist_atr);
+            const pct = Math.max(0, Math.min(100, Math.round(100 * (1 - Math.min(dist, 2) / 2))));
+            const priceDist = (typeof m.atr1h === 'number' && m.atr1h > 0) ? (dist * m.atr1h) : null;
+            uh += `<div style="display:flex;align-items:center;gap:10px;font-size:12px;flex-wrap:wrap;">
+                     <span style="font-weight:700;min-width:64px;">${esc(asset)}</span>
+                     <span class="badge ${s.d === 1 ? 'badge-long' : 'badge-short'}">${s.d === 1 ? 'LONG' : 'SHORT'}</span>
+                     <span style="color:var(--muted);min-width:150px;">${esc(s.kind || '')} · ${SCANNER_NEXT_LABEL[s.next_stage] || SCANNER_STAGE_LABEL[s.stage] || ''}</span>
+                     <div class="score-bar-bg" style="flex:1;min-width:80px;max-width:160px;"><div class="score-bar-fill" style="background:${dirColor};width:${pct}%;"></div></div>
+                     <span style="font-family:var(--font-mono);color:var(--muted);min-width:70px;text-align:right;">${dist.toFixed(2)} ATR${priceDist !== null ? ' (' + scannerFmtNum(priceDist) + ')' : ''}</span>
+                   </div>`;
+        }
+        uh += '</div></div>';
+        urgentEl.innerHTML = uh;
+    }
 
     const visible = entries.filter(([, m]) => {
         if (scannerFilter === 'near') return scannerIsNear(m);
@@ -3366,17 +3444,20 @@ function renderScanner() {
     let h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;padding:14px;">';
     for (const [asset, m] of visible) {
         const setups = (m.setups || []).slice().sort((a, b) => b.stage - a.stage);
+        const blocked = scannerIsBlocked(m);
         h += '<div class="card" style="padding:14px;">';
-        h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        h += `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
                 <span style="font-weight:700;font-size:15px;">${esc(asset)}</span>
-                <span style="font-size:11px;color:var(--muted);">${m.entry === 'B' ? 'enters at break' : 'enters at trigger'} · target ${m.target_atr ? m.target_atr + ' ATR' : 'runner'}</span>
+                <span style="font-family:var(--font-mono);font-size:13px;color:var(--text);">${scannerFmtNum(m.current_price)}</span>
               </div>`;
-        if (m.paused) {
-            h += '<div style="color:var(--red);font-size:12px;margin-bottom:8px;">⏸ paused (paper only) — /resume to re-enable</div>';
-        }
-        if (m.has_position) {
-            h += '<div style="color:var(--accent);font-size:12px;margin-bottom:8px;">● live position open</div>';
-        }
+        h += `<div style="font-size:11px;color:var(--muted);margin-bottom:8px;">${m.entry === 'B' ? 'enters at break' : 'enters at trigger'} · target ${m.target_atr ? m.target_atr + ' ATR' : 'runner'}</div>`;
+
+        const badges = [];
+        if (m.has_position) badges.push('<span class="badge badge-open">● in a trade</span>');
+        if (m.paused) badges.push('<span class="badge badge-paused">⏸ paused</span>');
+        if (blocked && !m.paused) badges.push(`<span class="badge badge-blocked" title="${esc(scannerBlockLabel(m))}">blocked</span>`);
+        if (badges.length) h += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px;">${badges.join('')}</div>`;
+
         if (!setups.length) {
             h += '<div style="color:var(--muted);font-size:13px;">No live setup — flat, waiting for a new 4H swing</div>';
         } else {
@@ -3385,26 +3466,33 @@ function renderScanner() {
                 const label = SCANNER_STAGE_LABEL[s.stage] ?? '—';
                 const dist = (typeof s.dist_atr === 'number') ? s.dist_atr : null;
                 const pct = dist === null ? 0 : Math.max(0, Math.min(100, Math.round(100 * (1 - Math.min(dist, 2) / 2))));
+                const priceDist = (dist !== null && typeof m.atr1h === 'number' && m.atr1h > 0) ? Math.abs(dist * m.atr1h) : null;
+                const age = scannerFmtAge(s.setup_age_hr);
                 h += `<div class="score-row" style="border-bottom:1px solid var(--border);padding:8px 0;">
-                        <div class="score-header">
+                        <div class="score-header" style="flex-direction:column;align-items:stretch;">
                             <span class="score-name" style="color:${dirColor};">${s.d === 1 ? 'LONG' : 'SHORT'} · ${esc(s.kind || '')}</span>
-                            <span class="score-meta">${label}${dist !== null ? ' · ' + dist + ' ATR ' + (SCANNER_NEXT_LABEL[s.next_stage] || '') : ''}</span>
+                            <span class="score-meta">${label}${dist !== null ? ' · ' + dist + ' ATR' + (priceDist !== null ? ' (' + scannerFmtNum(priceDist) + ')' : '') + ' ' + (SCANNER_NEXT_LABEL[s.next_stage] || '') : ''}</span>
                         </div>
                         <div class="score-bar-bg"><div class="score-bar-fill" style="background:${dirColor};width:${pct}%;"></div></div>
-                        <div style="font-size:11px;color:var(--muted);margin-top:4px;">R2 ${scannerFmtNum(s.r2)} · R1 ${scannerFmtNum(s.r1)}</div>
+                        <div style="font-size:11px;color:var(--muted);margin-top:4px;">R2 ${scannerFmtNum(s.r2)} · R1 ${scannerFmtNum(s.r1)}${age ? ' · age ' + age : ''}</div>
                       </div>`;
             }
         }
         if ((m.recent || []).length) {
-            h += '<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">' +
-                 '<div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">Recent decisions</div>';
+            const recId = 'scan-rec-' + asset;
+            h += `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border);">
+                    <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;cursor:pointer;" onclick="scannerToggleRecent('${recId}')">
+                        <span id="${recId}-toggle">▸ ${m.recent.length} recent decision${m.recent.length === 1 ? '' : 's'}</span>
+                    </div>
+                    <div id="${recId}" style="display:none;">`;
             for (const r of m.recent) {
                 const when = r.ts ? timeAgo(new Date(r.ts).getTime()) : '—';
-                h += `<div style="font-size:11px;color:var(--muted);font-family:var(--font-mono);padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                const rColor = r.stage === 'executed' ? 'var(--green2)' : r.stage === 'no_raw_signal' ? 'var(--muted)' : 'var(--yellow2)';
+                h += `<div style="font-size:11px;color:${rColor};font-family:var(--font-mono);padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                         ${when} — ${esc(r.reasoning || r.stage || '—')}
                       </div>`;
             }
-            h += '</div>';
+            h += '</div></div>';
         }
         h += '</div>';
     }
