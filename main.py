@@ -3085,6 +3085,37 @@ class TradingBot:
         except Exception as e:
             logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
 
+    @staticmethod
+    def _cs_field(details, name, default=None):
+        """Dashboard Signals-page rework (Oct 2026): composite_state arrives in `details` as either a
+        plain dict (every council-path call site already converts it via .to_dict()) or, in principle, a
+        raw CompositeState object -- same dual-access shape as the proof-gate's local _cs_get. Used to pull
+        the NS-engine/Livermore fields the signals table's new metadata actually needs, without assuming
+        which form showed up at a given call site."""
+        cs = (details or {}).get("composite_state")
+        if cs is None:
+            return default
+        if isinstance(cs, dict):
+            return cs.get(name, default)
+        return getattr(cs, name, default)
+
+    def _signal_meta(self, details):
+        """Dashboard Signals-page rework (Oct 2026): the fields that actually reflect the live architecture
+        (council-vote-only since council_suspended, NS-engine proofs/setups are what decides, Livermore is
+        the structural regime read) -- stashed in the signals table's existing metadata JSON column rather
+        than new top-level columns, so this never needs a Supabase migration to be safe to deploy."""
+        return {
+            "decision_type": details.get("decision_type"),
+            "total_score": details.get("total_score"),
+            "required_score": details.get("required_score"),
+            "aggregator_mode": details.get("aggregator_mode"),
+            "council_vote": details.get("council_vote"),
+            "ns_entry": self._cs_field(details, "ns_entry"),
+            "ns_kind": self._cs_field(details, "ns_kind_raw"),
+            "livermore_state_1h": self._cs_field(details, "livermore_state_1h"),
+            "livermore_state_4h": self._cs_field(details, "livermore_state_4h"),
+        }
+
     def _resolve_generic_gate_id(self, *, block_source: str = "", reasoning: str = "", block_reason: str = ""):
         """B3 G2 / B5-5a: shared gate_id resolution for internal aggregator-
         block paths that don't already carry a known gate_id. Extracted out
@@ -8180,6 +8211,7 @@ class TradingBot:
                         ai_details=details.get("ai_validation"),
                         executed=False,
                         force_insert=True,
+                        metadata=self._signal_meta(details),
                     )
                 # Shadow-track so the engine can measure cooldown opportunity cost
                 self._shadow_open_blocked(
@@ -8876,6 +8908,7 @@ class TradingBot:
                             ai_modified=details.get("ai_modified", False),
                             ai_details=details.get("ai_validation"),
                             executed=True,
+                            metadata=self._signal_meta(details),
                         )
 
                         # Link signal to trade ID if available
@@ -9588,6 +9621,7 @@ class TradingBot:
                     ai_modified=details.get("ai_modified", False),
                     ai_details=details.get("ai_validation"),
                     executed=False,
+                    metadata=self._signal_meta(details),
                 )
 
                 if is_new:
