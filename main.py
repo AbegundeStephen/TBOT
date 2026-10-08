@@ -4703,15 +4703,39 @@ class TradingBot:
                 import os as _os, json as _json   # B12 (review fix R3): don't rely on the block above
                 _ns_mk_cfg = (self.config.get("phase_config", {}) or {}).get("ns_markets", {}) or {}
                 _scan_snapshot = {}
+                _scan_now = datetime.now(timezone.utc)
                 for _scan_asset, _mk_cfg in _ns_mk_cfg.items():
                     _scan_cs = (self._latest_composite_state or {}).get(_scan_asset)
-                    _scan_setups = (_scan_cs.get("ns_setups") or []) if isinstance(_scan_cs, dict) else []
+                    _scan_setups_raw = (_scan_cs.get("ns_setups") or []) if isinstance(_scan_cs, dict) else []
+                    # Dashboard scanner redesign: age each setup (hours since its
+                    # confirmation bar) server-side -- cheaper and far more robust
+                    # than having the dashboard parse ns_engine's raw `conf`
+                    # timestamp string (pandas Timestamp repr, not ISO-8601) itself.
+                    _scan_setups = []
+                    for _su in _scan_setups_raw:
+                        _su = dict(_su)
+                        try:
+                            _conf_ts = pd.Timestamp(_su.get("conf"))
+                            if pd.isna(_conf_ts):
+                                raise ValueError("no conf timestamp")
+                            if _conf_ts.tzinfo is None:
+                                _conf_ts = _conf_ts.tz_localize("UTC")
+                            _su["setup_age_hr"] = round((_scan_now - _conf_ts.to_pydatetime()).total_seconds() / 3600.0, 1)
+                        except Exception:
+                            _su["setup_age_hr"] = None
+                        _scan_setups.append(_su)
                     _scan_snapshot[_scan_asset] = {
                         "entry": _mk_cfg.get("entry"), "target_atr": _mk_cfg.get("target_atr"),
                         "exit": _mk_cfg.get("exit"), "setups": _scan_setups,
                         "paused": self._ns_market_paused(_scan_asset),
                         "has_position": any(getattr(_p, "asset", None) == _scan_asset
                                             for _p in self.portfolio_manager.positions.values()),
+                        # Dashboard scanner redesign: live price and 1H ATR, so the
+                        # card can show distance-to-trigger in real price terms
+                        # instead of ATR multiples alone. current_prices is already
+                        # built earlier this same cycle (~line 4595) -- no new fetch.
+                        "current_price": current_prices.get(_scan_asset),
+                        "atr1h": (_scan_cs.get("ns_atr1") or _scan_cs.get("atr_1h")) if isinstance(_scan_cs, dict) else None,
                     }
                 _scan_path = _os.path.join(
                     _os.path.dirname(_os.path.abspath(__file__)),
