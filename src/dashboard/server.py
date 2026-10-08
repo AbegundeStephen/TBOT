@@ -1060,6 +1060,48 @@ def combined_chart_image(asset):
     return resp
 
 
+_CHART_TFS = ("1H", "4H", "1D", "1W")
+
+
+@app.route("/single/<asset>/<tf>")
+def single_chart_image(asset, tf):
+    """Dashboard item (Oct 2026): one timeframe panel (1H/4H/1D/1W) instead of the combined four-panel
+    picture, so the Charts tab can toggle between timeframes and load just the one requested. Written by
+    src/ai/combined_chart.py's write_singles (a side effect of write_combined, same redraw-on-change rule)."""
+    from flask import send_file
+    tf_u = str(tf).upper()
+    if tf_u not in _CHART_TFS:
+        return jsonify({"error": "unknown timeframe"}), 404
+    p = os.path.join(project_root, "logs", "charts", "%s_%s.png" % (str(asset).upper(), tf_u))
+    if not os.path.exists(p):
+        return jsonify({"error": "no %s chart yet for %s" % (tf_u, asset)}), 404
+    resp = send_file(p, mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/api/chart/<asset>/<tf>/meta")
+def get_chart_tf_meta(asset, tf):
+    """Existence + freshness for one single-timeframe panel, without transferring the PNG itself --
+    mirrors /api/chart/<asset>/meta but checks the specific <ASSET>_<TF>.png file, not the proof card."""
+    asset_u = asset.upper()
+    tf_u = str(tf).upper()
+    if asset_u not in _ASSETS:
+        return jsonify({"error": "unknown asset"}), 404
+    if tf_u not in _CHART_TFS:
+        return jsonify({"error": "unknown timeframe"}), 404
+    chart_path = os.path.join(project_root, "logs", "charts", f"{asset_u}_{tf_u}.png")
+    if not os.path.exists(chart_path):
+        return jsonify({"asset": asset_u, "timeframe": tf_u, "exists": False, "updated_at": None})
+    mtime = os.path.getmtime(chart_path)
+    return jsonify({
+        "asset": asset_u,
+        "timeframe": tf_u,
+        "exists": True,
+        "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+    })
+
+
 @app.route("/api/chart/<asset>")
 def get_chart_image(asset):
     """

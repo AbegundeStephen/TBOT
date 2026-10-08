@@ -1199,6 +1199,7 @@
                     <span class="shadow-meta" id="chart-last-updated">—</span>
                 </div>
                 <div class="lv-chart-toolbar" id="chart-asset-picker"></div>
+                <div class="lv-chart-toolbar" id="chart-tf-picker" style="border-top:1px solid var(--border);"></div>
                 <div id="chart-body" style="padding:14px;">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
@@ -1539,7 +1540,7 @@ async function loadAll() {
         loadPnLChart(),
         loadOpenTrades(),
         loadClosedTrades(),
-        loadSignals(),
+        loadSignals(true),
         loadShadow(),
         loadRegimes(),
         loadPerformance(),
@@ -1664,8 +1665,18 @@ async function loadPortfolioChart() {
         if (!d.history?.length) return;
         const labels = d.history.map(s => new Date(s.timestamp).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}));
         const values = d.history.map(s => s.total_value);
+        // Routine 30s refresh: update the existing chart's data in place instead
+        // of destroying and recreating it. destroy+recreate replays Chart.js's
+        // creation animation on every poll, which is what made this panel (and
+        // the two others that did the same thing) look like it was "reloading"
+        // every 30 seconds even though the underlying data rarely changes.
+        if (portfolioChart) {
+            portfolioChart.data.labels = labels;
+            portfolioChart.data.datasets[0].data = values;
+            portfolioChart.update('none');
+            return;
+        }
         const ctx = document.getElementById('portfolioChart').getContext('2d');
-        if (portfolioChart) portfolioChart.destroy();
         portfolioChart = new Chart(ctx, {
             type: 'line',
             data: {
@@ -1694,8 +1705,13 @@ async function loadPnLChart() {
         if (!d.trades?.length) return;
         const wins   = d.trades.filter(t => t.pnl > 0).length;
         const losses = d.trades.filter(t => t.pnl <= 0).length;
+        // Same in-place-update reasoning as loadPortfolioChart above.
+        if (pnlChart) {
+            pnlChart.data.datasets[0].data = [wins, losses];
+            pnlChart.update('none');
+            return;
+        }
         const ctx = document.getElementById('pnlChart').getContext('2d');
-        if (pnlChart) pnlChart.destroy();
         pnlChart = new Chart(ctx, {
             type: 'doughnut',
             data: {
@@ -1719,9 +1735,8 @@ function renderShadowPnLChart(closedResults) {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        if (shadowChart) { shadowChart.destroy(); shadowChart = null; }
-
         if (!closedResults || !closedResults.length) {
+            if (shadowChart) { shadowChart.destroy(); shadowChart = null; }
             // Show a placeholder doughnut so the canvas isn't blank
             shadowChart = new Chart(ctx, {
                 type: 'doughnut',
@@ -1744,6 +1759,22 @@ function renderShadowPnLChart(closedResults) {
         const losses = closedResults.filter(r => (r.net_pnl_pct || 0) <= 0).length;
         const total  = wins + losses;
         const wr     = total ? Math.round(wins / total * 100) : 0;
+
+        // Routine refresh of an already-real (non-placeholder) chart: update in
+        // place instead of destroy+recreate -- same reasoning as the other two
+        // charts, plus this one's label text and win-rate colour change with
+        // the data, so both need refreshing on the instance, not just at
+        // creation time. $wr is a mutable property the centreLabel plugin
+        // below reads at draw time instead of closing over `wr`, which would
+        // otherwise freeze at whatever it was when the chart was first built.
+        if (shadowChart && shadowChart.data.labels[0] !== 'No data yet') {
+            shadowChart.data.labels = [`Win (${wins})`, `Loss (${losses})`];
+            shadowChart.data.datasets[0].data = [wins || 0.001, losses || 0.001];
+            shadowChart.$wr = wr;
+            shadowChart.update('none');
+            return;
+        }
+        if (shadowChart) { shadowChart.destroy(); shadowChart = null; }
 
         shadowChart = new Chart(ctx, {
             type: 'doughnut',
@@ -1768,18 +1799,22 @@ function renderShadowPnLChart(closedResults) {
                 }
             },
             plugins: [{
-                // Centre label showing win rate
+                // Centre label showing win rate. Reads chart.$wr (set right
+                // after creation, and refreshed on every in-place update
+                // above) instead of closing over `wr` -- a closure would
+                // freeze at creation time and never reflect a later update.
                 id: 'centreLabel',
                 afterDraw(chart) {
+                    const liveWr = chart.$wr ?? wr;
                     const { ctx: c, chartArea: { left, right, top, bottom } } = chart;
                     const cx = (left + right) / 2;
                     const cy = (top  + bottom) / 2;
                     c.save();
                     c.textAlign = 'center';
                     c.textBaseline = 'middle';
-                    c.fillStyle = wr >= 50 ? '#a78bfa' : '#f87171';
+                    c.fillStyle = liveWr >= 50 ? '#a78bfa' : '#f87171';
                     c.font = 'bold 18px system-ui, sans-serif';
-                    c.fillText(wr + '%', cx, cy - 8);
+                    c.fillText(liveWr + '%', cx, cy - 8);
                     c.fillStyle = '#64748b';
                     c.font = '11px system-ui, sans-serif';
                     c.fillText('win rate', cx, cy + 10);
@@ -1787,6 +1822,7 @@ function renderShadowPnLChart(closedResults) {
                 }
             }]
         });
+        shadowChart.$wr = wr;
     } catch(e) { console.warn('[Shadow chart]', e); }
 }
 
@@ -2360,10 +2396,15 @@ async function ensureSignals() {
     if (!_signalsLoaded) { _signalsLoaded = true; await loadSignals(); }
 }
 
-async function loadSignals() {
+// `silent` distinguishes a user-initiated load (mode/filter/page change --
+// show the spinner, the user is waiting on it) from a routine 30s background
+// refresh via loadAll() -- which should update the table's rows in place with
+// no visible blank/spinner frame, and should leave the last-good data on
+// screen (not an error box) if the background fetch happens to fail.
+async function loadSignals(silent=false) {
     const asset = document.getElementById('signals-asset-filter')?.value || '';
-    if (signalMode === 'recent') await loadRecentSignals(asset);
-    else await loadSignalHistory(signalPage, asset);
+    if (signalMode === 'recent') await loadRecentSignals(asset, silent);
+    else await loadSignalHistory(signalPage, asset, silent);
 }
 
 function switchSignalMode(mode) {
@@ -2376,21 +2417,21 @@ function switchSignalMode(mode) {
 
 function onSignalFilterChange() { signalPage = 1; loadSignals(); }
 
-async function loadRecentSignals(asset='') {
+async function loadRecentSignals(asset='', silent=false) {
     const el = document.getElementById('signals-table-container');
-    el.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
+    if (!silent) el.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
     try {
         let url = `${API}/api/signals?limit=20`; if (asset) url += `&asset=${asset}`;
         const d = await fetchJSON(url);
         signalCache = d.signals || [];
         document.getElementById('signals-meta').textContent = signalCache.length + ' signals';
         renderSignalsTable(signalCache, el);
-    } catch(e) { el.innerHTML = err(e); }
+    } catch(e) { if (!silent) el.innerHTML = err(e); }
 }
 
-async function loadSignalHistory(page=1, asset='') {
+async function loadSignalHistory(page=1, asset='', silent=false) {
     const el = document.getElementById('signals-table-container');
-    el.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
+    if (!silent) el.innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
     try {
         let url = `${API}/api/signals/history?days=30&page=${page}&page_size=${signalPageSize}`;
         if (asset) url += `&asset=${asset}`;
@@ -2400,7 +2441,22 @@ async function loadSignalHistory(page=1, asset='') {
         document.getElementById('signals-meta').textContent = signalTotal.toLocaleString() + ' signals in 30 days';
         renderSignalsTable(signalCache, el);
         renderPagination(signalPage, signalTotalPages, signalTotal);
-    } catch(e) { el.innerHTML = err(e); }
+    } catch(e) { if (!silent) el.innerHTML = err(e); }
+}
+
+// Dashboard Signals-page rework (Oct 2026): MR/TF/EMA sub-signals and the AI
+// validator column were disconnected from what actually decides a trade --
+// use_ai_validation is false in config (the validator never runs at all, so
+// its column was a constant warning triangle regardless of input), and
+// council_suspended means the council's score records a vote but never
+// blocks a proof; the NS-engine's proof/setup state is what actually decides
+// now (see src/execution/ns_engine.py, config/config.json phase_config).
+// main.py now stashes that live context -- ns_entry/ns_kind, livermore
+// state, the council's score/decision_type -- into the signals table's
+// existing metadata JSON column (main.py's _signal_meta()); this parses it.
+function parseSignalMeta(s) {
+    if (!s || !s.metadata) return null;
+    try { return typeof s.metadata === 'string' ? JSON.parse(s.metadata) : s.metadata; } catch(e) { return null; }
 }
 
 function getSignalOutcome(s) {
@@ -2413,27 +2469,21 @@ function getSignalOutcome(s) {
     if (rsn === 'blocked_by_trap_filter') return { cls:'outcome-filtered', text:'🪤 Trap filter' };
     if (rsn === 'blocked_by_governor') return { cls:'outcome-filtered', text:'🛑 Governor' };
     if (rsn.startsWith('econ_block'))  return { cls:'outcome-filtered', text:'📅 Econ event' };
-    // Parse ai_details for action
-    let aiAction = null;
-    if (s.ai_details) {
-        try {
-            const ai = typeof s.ai_details==='string' ? JSON.parse(s.ai_details) : s.ai_details;
-            aiAction = ai.action || null;
-            if (aiAction === 'rejected') return { cls:'outcome-filtered', text:'❌ AI: '+(ai.reason||ai.rejection_reason||'rejected') };
-            if (aiAction === 'approved' || (aiAction && aiAction.startsWith('bypassed'))) {
-                return { cls:'outcome-conflict', text:'⚠️ AI ✅ not executed' };
-            }
-        } catch(e){}
+    // The council votes but never blocks (council_suspended) -- a signal that
+    // reaches here without executing was stopped by a gate downstream of the
+    // aggregator (proof reuse, session window, trading limits, etc), not by
+    // the council's own score. Show its decision_type when one was recorded.
+    const meta = parseSignalMeta(s);
+    if (meta?.decision_type && !/^HOLD/i.test(meta.decision_type)) {
+        return { cls:'outcome-filtered', text:'🏛 ' + meta.decision_type };
     }
-    // Fallback: use the stored boolean
-    if (s.ai_validated) return { cls:'outcome-conflict', text:'⚠️ AI ✅ not executed' };
-    return { cls:'outcome-filtered', text:'❌ AI not validated' };
+    return { cls:'outcome-hold', text:'⚪ No proof' };
 }
 
 function renderSignalsTable(signals, container) {
     if (!signals?.length) { container.innerHTML = emptyState('📡','No signals found'); return; }
     let h = '<div style="overflow-x:auto;"><table class="data-table" style="min-width:1000px;"><thead><tr>';
-    h += '<th>Time</th><th>Asset</th><th>Signal</th><th>Regime</th><th>MR</th><th>TF</th><th>EMA</th><th>AI</th><th>Price</th><th>Outcome</th>';
+    h += '<th>Time</th><th>Asset</th><th>Signal</th><th>Regime</th><th>Livermore</th><th>Proof</th><th>Council</th><th>Price</th><th>Outcome</th>';
     h += '</tr></thead><tbody>';
     signals.forEach((s, i) => {
         const sig   = s.signal===1?'BUY':s.signal===-1?'SELL':'HOLD';
@@ -2441,14 +2491,17 @@ function renderSignalsTable(signals, container) {
         const ts    = fmtDate(s.timestamp);
         const reg   = (s.regime||'?').toUpperCase();
         const regC  = reg.includes('BULL')?'var(--green)':reg.includes('BEAR')?'var(--red)':reg.includes('RANG')?'var(--yellow)':'var(--muted2)';
-        function sc(sig,conf) {
-            if (sig==null) return '<td style="text-align:center;color:var(--muted);">—</td>';
-            const ic=sig===1?'🟢':sig===-1?'🔴':'⚪'; const d=sig===1?'BUY':sig===-1?'SELL':'FLAT';
-            return `<td style="text-align:center;">${ic} ${d}${conf!=null?'<div style="font-size:10px;color:var(--muted);">'+(conf*100).toFixed(0)+'%</div>':''}</td>`;
-        }
-        let ai='—';
-        if (s.ai_details) { try { const a=typeof s.ai_details==='string'?JSON.parse(s.ai_details):s.ai_details; ai=a.action==='approved'?'✅':a.action==='rejected'?'❌':`⚠️`; } catch(e){ai=s.ai_validated?'✅':'—';} }
-        else ai = s.ai_validated ? '✅' : '—';
+        const meta  = parseSignalMeta(s);
+        const lsm1h = meta?.livermore_state_1h, lsm4h = meta?.livermore_state_4h;
+        const livermoreCell = (lsm1h || lsm4h)
+            ? `<div style="font-size:11px;">${esc(lsm1h||'—')}</div><div style="font-size:10px;color:var(--muted);">4H: ${esc(lsm4h||'—')}</div>`
+            : '<span style="color:var(--muted);">—</span>';
+        const proofCell = meta?.ns_entry
+            ? `<div style="font-size:11px;">${esc(meta.ns_entry)}</div><div style="font-size:10px;color:var(--muted);">${esc(meta.ns_kind||'')}</div>`
+            : '<span style="color:var(--muted);">—</span>';
+        const councilCell = (meta?.total_score!=null && meta?.required_score!=null)
+            ? `<span style="font-family:var(--font-mono);font-size:11px;">${Number(meta.total_score).toFixed(2)}/${Number(meta.required_score).toFixed(2)}</span>`
+            : '<span style="color:var(--muted);">—</span>';
         const price = s.price!=null ? s.price.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:5}) : '—';
         const out = getSignalOutcome(s);
         h += `<tr onclick="showSignalDetail(${i})" style="cursor:pointer;">
@@ -2456,10 +2509,9 @@ function renderSignalsTable(signals, container) {
             <td><strong>${s.asset}</strong></td>
             <td><span class="badge ${sigBg}">${sig}</span><div style="font-size:10px;color:var(--muted);margin-top:2px;">${((s.signal_quality||0)*100).toFixed(0)}% quality</div></td>
             <td><span style="color:${regC};">${reg}</span><div style="font-size:10px;color:var(--muted);">${((s.regime_confidence||0)*100).toFixed(0)}%</div></td>
-            ${sc(s.mr_signal,s.mr_confidence)}
-            ${sc(s.tf_signal,s.tf_confidence)}
-            ${sc(s.ema_signal,s.ema_confidence)}
-            <td>${ai}</td>
+            <td>${livermoreCell}</td>
+            <td>${proofCell}</td>
+            <td style="text-align:center;">${councilCell}</td>
             <td style="white-space:nowrap;">${price}</td>
             <td class="${out.cls}" style="font-size:11px;">${out.text}</td>
         </tr>`;
@@ -2491,15 +2543,21 @@ function goSignalPage(p) {
 
 // Signal export
 function signalsToCsv(sigs) {
-    const h = ['Timestamp','Asset','Signal','Quality','Regime','RegimeConf','MR','MRConf','TF','TFConf','EMA','EMAConf','AI','Price','Executed','Outcome'].join(',');
-    const rows = sigs.map(s => [
-        s.timestamp,s.asset,
-        s.signal===1?'BUY':s.signal===-1?'SELL':'HOLD',
-        s.signal_quality,s.regime,s.regime_confidence,
-        s.mr_signal,s.mr_confidence,s.tf_signal,s.tf_confidence,s.ema_signal,s.ema_confidence,
-        s.ai_validated,s.price,s.executed,
-        getSignalOutcome(s).text.replace(/[^\w\s%:.+\-]/g,'').trim()
-    ].map(v=>v==null?'':String(v).includes(',')? `"${v}"`:v).join(','));
+    const h = ['Timestamp','Asset','Signal','Quality','Regime','RegimeConf','Livermore1H','Livermore4H',
+               'ProofEntry','ProofKind','CouncilScore','CouncilRequired','AggregatorMode','Price','Executed','Outcome'].join(',');
+    const rows = sigs.map(s => {
+        const meta = parseSignalMeta(s) || {};
+        return [
+            s.timestamp,s.asset,
+            s.signal===1?'BUY':s.signal===-1?'SELL':'HOLD',
+            s.signal_quality,s.regime,s.regime_confidence,
+            meta.livermore_state_1h,meta.livermore_state_4h,
+            meta.ns_entry,meta.ns_kind,
+            meta.total_score,meta.required_score,meta.aggregator_mode,
+            s.price,s.executed,
+            getSignalOutcome(s).text.replace(/[^\w\s%:.+\-]/g,'').trim()
+        ].map(v=>v==null?'':String(v).includes(',')? `"${v}"`:v).join(',');
+    });
     return [h,...rows].join('\n');
 }
 
@@ -2545,6 +2603,7 @@ function showSignalDetail(i) {
     // the fix; not putting the object in the HTML at all is.
     const s = signalCache[i];
     if (!s) return;
+    const meta = parseSignalMeta(s) || {};
     document.getElementById('modal-title').textContent = '📊 Signal Detail — ' + s.asset;
     let h = '<div class="detail-grid">';
     h += detailBox('Asset', s.asset);
@@ -2553,13 +2612,21 @@ function showSignalDetail(i) {
     h += detailBox('Price', s.price?s.price.toLocaleString():'—');
     h += detailBox('Quality', ((s.signal_quality||0)*100).toFixed(1)+'%');
     h += detailBox('Regime', (s.regime||'?').toUpperCase()+' ('+((s.regime_confidence||0)*100).toFixed(0)+'%)');
-    h += detailBox('MR', (s.mr_signal===1?'BUY':s.mr_signal===-1?'SELL':'FLAT')+' '+((s.mr_confidence||0)*100).toFixed(0)+'%');
-    h += detailBox('TF', (s.tf_signal===1?'BUY':s.tf_signal===-1?'SELL':'FLAT')+' '+((s.tf_confidence||0)*100).toFixed(0)+'%');
-    if (s.ema_signal!=null) h += detailBox('EMA', (s.ema_signal===1?'BUY':s.ema_signal===-1?'SELL':'FLAT')+' '+((s.ema_confidence||0)*100).toFixed(0)+'%');
-    h += detailBox('AI Validated', s.ai_validated?'✅ Yes':'❌ No');
     h += detailBox('Executed', s.executed?'✅ Yes':'⏳ No');
-    if (s.buy_score!=null)  h += detailBox('Buy Score',  ((s.buy_score||0)*100).toFixed(1)+'%');
-    if (s.sell_score!=null) h += detailBox('Sell Score', ((s.sell_score||0)*100).toFixed(1)+'%');
+    // Current architecture: the NS-engine's proof/setup state decides (see
+    // config/config.json phase_config.ns_markets); the council still scores
+    // every cycle but council_suspended means that score records a vote and
+    // never blocks a proof. MR/TF/EMA/AI boxes removed -- use_ai_validation
+    // is false and those sub-signals no longer drive anything.
+    h += detailBox('Livermore 1H', meta.livermore_state_1h || '—');
+    h += detailBox('Livermore 4H', meta.livermore_state_4h || '—');
+    h += detailBox('Proof Entry', meta.ns_entry || '—');
+    h += detailBox('Proof Kind', meta.ns_kind || '—');
+    if (meta.total_score!=null && meta.required_score!=null) {
+        h += detailBox('Council Score', `${Number(meta.total_score).toFixed(2)} / ${Number(meta.required_score).toFixed(2)}`);
+    }
+    if (meta.decision_type) h += detailBox('Decision Type', meta.decision_type);
+    if (meta.aggregator_mode) h += detailBox('Aggregator', meta.aggregator_mode.toUpperCase());
     h += '</div>';
 
     if (s.reasoning) {
@@ -2567,23 +2634,6 @@ function showSignalDetail(i) {
             <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">Reasoning</div>
             <div style="font-size:14px;font-weight:600;">${esc(s.reasoning)}</div>
         </div>`;
-    }
-
-    if (s.ai_details) {
-        try {
-            const ai=typeof s.ai_details==='string'?JSON.parse(s.ai_details):s.ai_details;
-            const bg=ai.action==='approved'?'rgba(16,185,129,0.08)':'rgba(239,68,68,0.08)';
-            h += `<div style="margin-top:16px;padding:14px;background:${bg};border:1px solid var(--border);border-radius:8px;">
-                <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:8px;">AI Validation</div>
-                <div><strong>Action:</strong> ${ai.action==='approved'?'✅ Approved':'❌ Rejected'}</div>`;
-            if (ai.rejection_reasons?.length) {
-                h += '<div style="margin-top:8px;"><strong>Reasons:</strong><ul style="margin:4px 0 0 16px;font-size:12px;color:var(--muted2);">';
-                ai.rejection_reasons.forEach(r => h+=`<li>${esc(r)}</li>`);
-                h += '</ul></div>';
-            }
-            if (ai.pattern_detected) h += `<div style="margin-top:8px;"><strong>Pattern:</strong> ${esc(ai.pattern_name)} (${((ai.pattern_confidence||0)*100).toFixed(1)}%)</div>`;
-            h += '</div>';
-        } catch(e){}
     }
 
     document.getElementById('modal-body').innerHTML = h;
@@ -3382,12 +3432,22 @@ document.addEventListener('DOMContentLoaded', () => {
 // ────────────────────────────────────────────────────────────
 // DECISION CHARTS (dashboard parity with Telegram's /chart)
 // ────────────────────────────────────────────────────────────
+const CHART_TFS = ['1H', '4H', '1D', '1W'];
+let chartTimeframe = '1H';
+
 function renderChartAssetPicker() {
     const el = document.getElementById('chart-asset-picker');
     el.innerHTML = LV_ASSETS.map(a =>
         `<button class="mode-btn${a === chartAsset ? ' active' : ''}" onclick="selectChartAsset('${a}')">${a}</button>`
     ).join('');
     chartPickerBuilt = true;
+}
+
+function renderChartTfPicker() {
+    const el = document.getElementById('chart-tf-picker');
+    el.innerHTML = CHART_TFS.map(tf =>
+        `<button class="mode-btn${tf === chartTimeframe ? ' active' : ''}" onclick="selectChartTf('${tf}')">${tf}</button>`
+    ).join('');
 }
 
 async function selectChartAsset(asset) {
@@ -3398,21 +3458,31 @@ async function selectChartAsset(asset) {
     await loadChartsSection();
 }
 
+async function selectChartTf(tf) {
+    chartTimeframe = tf;
+    document.querySelectorAll('#chart-tf-picker .mode-btn').forEach(b => {
+        b.classList.toggle('active', b.textContent === tf);
+    });
+    await loadChartsSection();
+}
+
 async function loadChartsSection() {
     if (!chartPickerBuilt) renderChartAssetPicker();
+    renderChartTfPicker();
     const body = document.getElementById('chart-body');
     try {
-        const meta = await fetchJSON(API + '/api/chart/' + chartAsset + '/meta');
+        const meta = await fetchJSON(API + '/api/chart/' + chartAsset + '/' + chartTimeframe + '/meta');
         if (!meta.exists) {
-            body.innerHTML = emptyState('🖼️', `No chart yet for ${chartAsset} — appears after the bot's next cycle`);
+            body.innerHTML = emptyState('🖼️', `No ${chartTimeframe} chart yet for ${chartAsset} — appears after the bot's next cycle`);
             document.getElementById('chart-last-updated').textContent = 'No data yet';
             return;
         }
         document.getElementById('chart-last-updated').textContent =
             'Updated ' + timeAgo(new Date(meta.updated_at).getTime());
         const bust = Date.now();
-        // B13 item 9C: the combined white chart (click to open full size); falls back to the proof card if not drawn yet
-        body.innerHTML = `<a href="${API}/combined/${chartAsset}?t=${bust}" target="_blank" title="open full size"><img src="${API}/combined/${chartAsset}?t=${bust}" alt="${chartAsset} combined chart" style="width:100%;border-radius:8px;display:block;cursor:zoom-in;" onerror="this.onerror=null;this.src='${API}/api/chart/${chartAsset}?t=${bust}';"></a>`;
+        // Dashboard item (Oct 2026): one timeframe panel at a time, loaded on toggle, instead of the
+        // combined four-panel picture -- see /single/<asset>/<tf> and src/ai/combined_chart.py.
+        body.innerHTML = `<a href="${API}/single/${chartAsset}/${chartTimeframe}?t=${bust}" target="_blank" title="open full size"><img src="${API}/single/${chartAsset}/${chartTimeframe}?t=${bust}" alt="${chartAsset} ${chartTimeframe} chart" style="width:100%;border-radius:8px;display:block;cursor:zoom-in;"></a>`;
     } catch (e) {
         body.innerHTML = emptyState('🖼️', 'Could not load chart');
     }
