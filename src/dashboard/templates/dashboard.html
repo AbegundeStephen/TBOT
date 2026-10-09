@@ -1227,6 +1227,9 @@
                                 <option value="USOIL">USOIL</option>
                                 <option value="GBPAUD">GBPAUD</option>
                                 <option value="EURJPY">EURJPY</option>
+                                <option value="JP225">JP225</option>
+                                <option value="SILVER">SILVER</option>
+                                <option value="AUDJPY">AUDJPY</option>
                             </select>
                         </div>
                         <div>
@@ -1467,6 +1470,9 @@
                             <option value="USOIL">USOIL</option>
                             <option value="GBPAUD">GBPAUD</option>
                             <option value="EURJPY">EURJPY</option>
+                            <option value="JP225">JP225</option>
+                            <option value="SILVER">SILVER</option>
+                            <option value="AUDJPY">AUDJPY</option>
                         </select>
                         <div id="dl-backtest-runs" style="max-height:320px;overflow-y:auto;">
                             <div class="spinner-wrap"><div class="spinner"></div></div>
@@ -1514,7 +1520,7 @@ let pnlChart       = null;
 let shadowChart    = null;
 
 // Livermore section state
-const LV_ASSETS = ['BTC', 'GOLD', 'USTEC', 'EURUSD', 'USOIL', 'GBPAUD', 'EURJPY'];
+const LV_ASSETS = ['BTC', 'GOLD', 'USTEC', 'EURUSD', 'USOIL', 'GBPAUD', 'EURJPY', 'JP225', 'SILVER', 'AUDJPY'];
 let livermoreChart = null;
 let livermoreAsset = 'BTC';
 let chartAsset = 'BTC';
@@ -2953,7 +2959,7 @@ const CC_SECTIONS = {
     portfolio:           { icon: '💼', label: 'Portfolio' },
     trading:             { icon: '⚙️', label: 'Execution' },
 };
-const CC_ASSETS = ['BTC', 'GOLD', 'EURUSD', 'USTEC', 'USOIL', 'GBPAUD', 'EURJPY'];
+const CC_ASSETS = ['BTC', 'GOLD', 'EURUSD', 'USTEC', 'USOIL', 'GBPAUD', 'EURJPY', 'JP225', 'SILVER', 'AUDJPY'];
 
 async function loadControlCenter(forceRefresh = false) {
     // Always re-fetch if there are no unsaved changes, or if explicitly forced.
