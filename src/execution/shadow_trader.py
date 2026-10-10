@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -511,6 +512,10 @@ class ShadowTradingEngine:
         archive_dir: str = "logs/shadow",
     ):
         self.open_positions: List[ShadowPosition] = []
+        # B14 item 3.3 (Desire 8 Oct): practice exits now run in the trade loop's thread while the look opens new
+        # practice trades in the main thread -- every change to open_positions holds this lock, so neither thread
+        # can drop the other's trade when it rebuilds the list.
+        self._lock = threading.RLock()
         self.closed_results: List[dict] = []
         self._max_positions = max_positions
         self._max_closed    = max_closed
@@ -996,6 +1001,15 @@ class ShadowTradingEngine:
                 _cfg_ns = _nsm(asset_key, (_cs_ns.get("phase_config") or {})) or {}
                 _st_ns, _tp_ns = _nsl(_d_ns, pos.entry_price, float(_cs_ns["ns_r2"]), float(_cs_ns["ns_atr1"]),
                                       _cfg_ns.get("min_sl_pct", 0.0), _cs_ns.get("ns_target_atr"))
+                # B14 (knock-on of item 1.1): practice trades follow the live levels -- the package's own stop for a
+                # package entry, and a line target as it is
+                if _st_ns is not None and _cs_ns.get("ns_entry") == "PKG" and _cs_ns.get("ns_stop") not in (None, "None") \
+                        and _d_ns * (float(pos.entry_price) - float(_cs_ns["ns_stop"])) > 0:
+                    _st_ns = float(_cs_ns["ns_stop"])
+                if _st_ns is not None and _cs_ns.get("ns_target_kind") not in (None, "", "normal") \
+                        and _cs_ns.get("ns_target") not in (None, "None") \
+                        and _d_ns * (float(_cs_ns["ns_target"]) - float(pos.entry_price)) > 0:
+                    _tp_ns = float(_cs_ns["ns_target"])
                 if _st_ns is not None:
                     pos.stop_loss = pos.initial_stop_loss = float(_st_ns)
                     pos.take_profit = float(_tp_ns) if _tp_ns else 0.0
@@ -1014,7 +1028,8 @@ class ShadowTradingEngine:
         except Exception as _ns_e:
             logger.warning(f"[NS-PRACTICE] {asset_key}: new-engine levels not applied ({_ns_e})")
 
-        self.open_positions.append(pos)
+        with self._lock:
+            self.open_positions.append(pos)
         logger.info(
             f"[SHADOW] Opened {side.upper()} {asset} @ {entry_price:.5f} "
             f"(src={strategy_source}, gate={gate_blocked_by}) "
@@ -1031,7 +1046,9 @@ class ShadowTradingEngine:
                 return
             t_last = close_times(df_1h, 1)[-1]
             hi, lo, cl = (df_1h[c].astype(float).values for c in ("high", "low", "close"))
-            for pos in list(self.open_positions):
+            with self._lock:
+                _snap = list(self.open_positions)
+            for pos in _snap:
                 if pos.closed or pos.asset.upper() != str(asset).upper() or getattr(pos, "ns_exit", "") != "RUNNER":
                     continue
                 if getattr(pos, "_ns_last_ts", None) == t_last:
@@ -1059,18 +1076,19 @@ class ShadowTradingEngine:
         Returns number of positions closed this tick.
         """
         closed_count = 0
-        still_open = []
-        for pos in self.open_positions:
-            price = price_map.get(pos.asset)
-            if price is None or price <= 0:
-                still_open.append(pos)
-                continue
-            if pos.tick_update(price):
-                self._archive(pos)
-                closed_count += 1
-            else:
-                still_open.append(pos)
-        self.open_positions = still_open
+        with self._lock:                    # B14 item 3.3: also called from the trade loop's thread
+            still_open = []
+            for pos in self.open_positions:
+                price = price_map.get(pos.asset)
+                if price is None or price <= 0:
+                    still_open.append(pos)
+                    continue
+                if pos.tick_update(price):
+                    self._archive(pos)
+                    closed_count += 1
+                else:
+                    still_open.append(pos)
+            self.open_positions = still_open
         return closed_count
 
     def candle_update_all(self, price_map: Dict[str, float]) -> None:
@@ -1078,17 +1096,18 @@ class ShadowTradingEngine:
         Candle-tier update — call every ~5 minutes.
         Increments bar counters and applies time stops.
         """
-        still_open = []
-        for pos in self.open_positions:
-            price = price_map.get(pos.asset)
-            if price and price > 0:
-                pos.current_price = price
-            pos.candle_update()
-            if pos.closed:
-                self._archive(pos)
-            else:
-                still_open.append(pos)
-        self.open_positions = still_open
+        with self._lock:                    # B14 item 3.3
+            still_open = []
+            for pos in self.open_positions:
+                price = price_map.get(pos.asset)
+                if price and price > 0:
+                    pos.current_price = price
+                pos.candle_update()
+                if pos.closed:
+                    self._archive(pos)
+                else:
+                    still_open.append(pos)
+            self.open_positions = still_open
 
     def save_open_positions(self) -> int:
         """MEASURE-2 S1: snapshot every OPEN position so a restart resumes
@@ -1110,7 +1129,9 @@ class ShadowTradingEngine:
             from dataclasses import asdict as _asdict
             from src.utils.run_status import write_json_atomic
             _rows = []
-            for _p in self.open_positions:
+            with self._lock:
+                _snap = list(self.open_positions)
+            for _p in _snap:
                 try:
                     _d = _asdict(_p)
                     for _k, _v in list(_d.items()):
@@ -1198,7 +1219,8 @@ class ShadowTradingEngine:
 
                     if _now_px:
                         _pos.current_price = _now_px
-                    self.open_positions.append(_pos)
+                    with self._lock:
+                        self.open_positions.append(_pos)
                     self._last_close_time.pop(_pos.asset.upper(), None)
                     _out["resumed"] += 1
                 except Exception as _re:

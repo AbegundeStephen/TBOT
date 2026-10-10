@@ -24,6 +24,10 @@ class HealthMonitor:
         self.last_heartbeat = time.time()
 
     ERROR_WINDOW_S = 3600        # B13 item 8: an error counts for one hour, then drops off
+    # B14 item 3.5 (Desire 8 Oct): the look now comes once every 30 minutes (at each 30-minute close), so its heartbeat
+    # may be up to ~30 minutes old between looks. 35 minutes = just over one look. The trade loop keeps its own strict
+    # 3-minute "alive" check (config/heartbeat.json vtm.loop_alive).
+    HEARTBEAT_MAX_S = 2100
 
     @property
     def error_count(self):
@@ -39,11 +43,11 @@ class HealthMonitor:
     def is_healthy(self):
         """
         Check if the system is healthy based on:
-        1. Last heartbeat within 60 seconds
+        1. Last heartbeat within HEARTBEAT_MAX_S (B14: 35 minutes, just over one look; was 60 seconds)
         2. Error count below 10
         """
         now = time.time()
-        heartbeat_ok = (now - self.last_heartbeat) < 60
+        heartbeat_ok = (now - self.last_heartbeat) < self.HEARTBEAT_MAX_S
         errors_ok = self.error_count < 10
 
         healthy = heartbeat_ok and errors_ok

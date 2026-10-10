@@ -215,8 +215,10 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
         if f.get("ns_entry") == "PKG":                                    # B13 item 7: say plainly what the package did
             _far = f.get("pkg_route") == "far"
             _g6 = (lambda _v: ("%.6g" % float(_v)) if _v not in (None, "None", "") else "-")
+            _why14 = str(f.get("ns_route") or "").replace("package: ", "") if f.get("ns_b14") else None
             lines += ["e  signal  %s  1H close %s" % (str(f.get("pkg_signal_t"))[:16], _g6(f.get("pkg_signal_close"))),
-                      "PACKAGE  %s, waited %sh: %s" % ("FAR entry" if _far else "old %s just ahead" % ("high" if d == 1 else "low"),
+                      "PACKAGE  %s, waited %sh: %s" % (("held back: " + _why14[:90]) if _why14 else   # B14: why it waited
+                                                      "FAR entry" if _far else "old %s just ahead" % ("high" if d == 1 else "low"),
                                                       f.get("pkg_wait_h"), f.get("pkg_how")),
                       ("           stop behind the last 30m higher low (far-entry rule)" if _far else
                        "           the closes had to clear %s (W)" % _g6(f.get("pkg_bigger"))),
@@ -228,9 +230,22 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
                   "labels: A+ %s" % (", ".join(f.get("ns_aplus") or []) or "-"),
                   "        watch %s" % (", ".join(f.get("ns_watch") or []) or "-"),
                   "brains at entry: 1H %s | 4H %s" % (f.get("ns_brain_1h") or "-", f.get("ns_brain_4h") or "-"),
-                  "checks: %s" % (f.get("ns_checks") or "-"),
-                  "diagonal: %s" % (("agrees (broke %s)" % str(f.get("ns_diag_break_t"))[:16]) if f.get("ns_diag_agrees")
-                                    else "none in the 24 h before")]          # B13 items 11/31: the tag on the card
+                  "checks: %s" % (f.get("ns_checks") or "-")]
+        if f.get("ns_b14"):
+            # B14 item 8.3 (Desire 9 Oct): the route, the witness, the lock and the staircase -- what the line map said
+            _g6b = (lambda _v: ("%.6g" % float(_v)) if _v not in (None, "None", "") else "-")
+            _walls = f.get("ns_walls") or []
+            lines += ["route: %s%s" % (f.get("ns_route") or "-", ("  [%s]" % f["ns_label"]) if f.get("ns_label") else ""),
+                      "witness: %s" % (f.get("ns_witness") or "none in the 12 h before"),
+                      "target: %s" % (f.get("ns_target_kind") or "normal"),
+                      ("lock: the stop goes to the entry when price reaches %s" % _g6b(f.get("ns_lock_at"))) if _walls
+                      else "lock: no big wall between the entry and the target"]
+            for _W in _walls[:3]:
+                lines.append("staircase: a 1H close past %s moves the stop to %s (%s)" % (
+                    _g6b(_W.get("s_far")), _g6b(_W.get("s_near")), _W.get("label", "")))
+        else:
+            lines.append("diagonal: %s" % (("agrees (broke %s)" % str(f.get("ns_diag_break_t"))[:16]) if f.get("ns_diag_agrees")
+                                           else "none in the 24 h before"))   # B13 items 11/31: the tag on the card
     elif what == "setup":
         lines = ["SETUP #%s - %s %s" % (obj.get("id"), side, str(obj.get("kind", "")).upper()), "",
                  "R2  %.6g = the line to break (4H swing CLOSE)" % r2, "    zone to wick %.6g" % edge,

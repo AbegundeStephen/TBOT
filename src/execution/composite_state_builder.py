@@ -2293,14 +2293,41 @@ class CompositeStateBuilder:
             _pcfg_ns = (getattr(state, "phase_config", {}) or {})
             if getattr(self, "_ns_engine", None) is None:
                 self._ns_engine = NSEngine(self.asset_type)
-            _res_ns = self._ns_engine.update(self._ns_state.get(self.asset_type), df, df_4h, _pcfg_ns, state)
+            # B14 item 1.2a (Desire 8 Oct): the engine gets its own ~75 days of hourly candles (main.py puts them in
+            # governor_data["df_1h_ns"]); everything else in the bot keeps reading the usual 25 days in `df`.
+            _df_ns = (governor_data or {}).get("df_1h_ns") if isinstance(governor_data, dict) else None
+            if _df_ns is not None and len(_df_ns) >= len(df) and len(df) and _df_ns.index[-1] == df.index[-1]:
+                self._ns_df_long = _df_ns
+            else:
+                # a call without the long frame (another call site): the last long frame, topped up with the newest
+                # candles, so no call ever decides on 25 days again
+                _lf = getattr(self, "_ns_df_long", None)
+                if _lf is not None and len(df) and len(_lf):
+                    _df_ns = pd.concat([_lf[_lf.index < df.index[0]], df])
+                    _df_ns = _df_ns[~_df_ns.index.duplicated(keep="last")]
+                else:
+                    _df_ns = df
+            # B14 section 4: the one line map, built at the first look after each candle close and read by the engine,
+            # the package, the trade manager, the chart and the card (line_map.py). Trading only reads it once the
+            # B14 rules are switched on.
+            _mp_ns = None
+            try:
+                from src.execution import line_map as _lmap
+                _mp_ns = _lmap.build_live(self.asset_type, _df_ns)
+            except Exception as _map_err:
+                logger.warning("[MAP] %s: line map not built this look: %s", self.asset_type, _map_err)
+            _res_ns = self._ns_engine.update(self._ns_state.get(self.asset_type), _df_ns, df_4h, _pcfg_ns, state,
+                                             mp=_mp_ns)
             self._ns_state[self.asset_type] = _res_ns["state"]
             # B13 (Desire 2 Oct): the package judges the signals the engine handed over (ns_package.py). Its entries
             # join this cycle's proofs and follow exactly the same path to the trade; its decisions go to Telegram.
+            # B14 item 1.1: an entry stays on the package's board until the trading look uses it (once, and only
+            # until the next 30m close), and each decision goes to Telegram the moment it is made.
             state.pkg_events = []
             try:
                 from src.execution import ns_package as _ns_pkg
-                _pkg_proofs, state.pkg_events = _ns_pkg.step(self.asset_type, _res_ns["state"], df, _pcfg_ns)
+                _pkg_proofs, state.pkg_events = _ns_pkg.step(self.asset_type, _res_ns["state"], _df_ns, _pcfg_ns,
+                                                             mp=_mp_ns)
                 if _pkg_proofs:
                     _res_ns["proofs"] = list(_res_ns["proofs"] or []) + list(_pkg_proofs)
             except Exception as _pkg_err:

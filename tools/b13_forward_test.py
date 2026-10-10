@@ -1,655 +1,3145 @@
-import base64, zlib, hashlib
-B = ("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")
-if len(B) != 49448 or hashlib.sha256(B.encode()).hexdigest()[:16].upper() != "919403BCBAF9855C":
-    raise SystemExit("COPY ERROR: the file is damaged (length %d) -- tell Claude" % len(B))
-exec(compile(zlib.decompress(base64.b64decode(B)).decode("utf-8"), "b13_forward_test", "exec"))
+# TBOT B13 WEEKLY FORWARD TEST (6 Oct 2026) -- read-only. Rebuilds the SILVER long of 5 Oct 10:00 UTC with the bot's own code
+# and candles, then tests two fixes over 16 months: lines judged on wicks, and the majority check on trades taken at once.
+# Desire's option 1 (2 Oct): the package WITHOUT the bigger-timeframe majority -- only the 30m/1H closes and the
+# bigger-line rule decide. 'near' rows send only signals with a bigger 4H line just ahead (or that the engine calls too
+# far) to the package and take the rest at once; 'all' rows judge every signal. E + skip-near alongside, same pricing.
+import collections, glob, hashlib, importlib.util, json, logging, os, re, sys, time, types
+from datetime import timedelta
+import numpy as np
+import pandas as pd
+
+logging.basicConfig(level=logging.WARNING)
+ENGINE = os.path.join("src", "execution", "ns_engine.py")
+ENGINE_SHA = "849177CE5E31979E3BF0402460CF72249D387E63342C41B829B70866F581E153"   # B14 (9 Oct) engine
+MARKETS = {"BTC": "BTCUSDm", "GOLD": "XAUUSDm", "USTEC": "USTECm", "USOIL": "USOILm", "EURUSD": "EURUSDm",
+           "GBPAUD": "GBPAUDm", "JP225": "JP225m", "EURJPY": "EURJPYm", "SILVER": "XAGUSDm", "AUDJPY": "AUDJPYm"}
+FALLBACK_USD = {"BTC": 0.01, "GOLD": 1.0, "SILVER": 50.0, "USOIL": 10.0, "USTEC": 0.05, "JP225": 0.02,
+                "EURUSD": 1000.0, "GBPAUD": 660.0, "EURJPY": 6.7, "AUDJPY": 6.7}
+B12_LIVE, B121_LIVE = pd.Timestamp("2026-09-28 21:50"), pd.Timestamp("2026-09-30 16:30")   # UTC (box 23:50 / 18:30)
+STOPS_RETEST = [("today", None), ("low+0.3", 0.3), ("low+0.5", 0.5), ("low+0.75", 0.75)]
+STOPS_BREAK = [("today", None), ("room0.5", 0.5), ("room0.75", 0.75)]
+T0 = time.time()
+
+
+def say(s=""):
+    print(s, flush=True)
+
+
+def stub_brain():
+    """Load the brain module by path so the engine's brain checks work without importing the whole bot."""
+    p = os.path.join("src", "execution", "livermore_state_machine.py")
+    if not os.path.exists(p):
+        return "brain file not found -- brain-level checks see no levels"
+    try:
+        for name in ("src", "src.execution"):
+            if name not in sys.modules:
+                mod = types.ModuleType(name)
+                mod.__path__ = [os.path.join(*name.split("."))]
+                sys.modules[name] = mod
+        spec = importlib.util.spec_from_file_location("src.execution.livermore_state_machine", p)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = m
+        spec.loader.exec_module(m)
+        sys.modules["src.execution"].livermore_state_machine = m
+        return "brain module loaded"
+    except Exception as e:
+        return "brain module failed to load (%s) -- brain-level checks see no levels" % e
+
+
+def load_engine(tag, hourly):
+    spec = importlib.util.spec_from_file_location("ns_engine_" + tag.replace("/", "_"), ENGINE)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    m.REPLAY_DAYS = 100000                      # replay the whole history, not just 30 days
+    if hourly:                                  # 1H/1H: hourly candles stand in for the 4H ones
+        _ct = m.close_times
+        m.close_times = lambda df, hours: _ct(df, 1)
+        m.hourly_to_4h = lambda df1: df1[["open", "high", "low", "close"]].astype(float)
+        m.WAIT_BREAK, m.WAIT_TOUCH, m.WAIT_TRIGGER = timedelta(hours=60), timedelta(hours=42), timedelta(hours=42)
+    return m
+
+
+def load_1h(sym):
+    p = os.path.join("data", "raw", "%s_1h.csv" % sym)
+    if not os.path.exists(p):
+        return None, "no price file %s" % p
+    df = pd.read_csv(p)
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    tcol = next((c for c in ("timestamp", "time", "datetime", "date", "open_time") if c in df.columns), df.columns[0])
+    ts = df[tcol]
+    if pd.api.types.is_numeric_dtype(ts):
+        idx = pd.to_datetime(ts, unit="s" if float(ts.max()) < 1e11 else "ms", utc=True)
+    else:
+        idx = pd.to_datetime(ts, utc=True, errors="coerce")
+    df.index = pd.DatetimeIndex(idx).tz_convert("UTC").tz_localize(None)
+    if not all(c in df.columns for c in ("open", "high", "low", "close")):
+        return None, "price file %s has no open/high/low/close columns" % p
+    df = df[["open", "high", "low", "close"]].astype(float)
+    df = df[~df.index.isna()].sort_index()
+    df = df[~df.index.duplicated(keep="last")].dropna()
+    return df, "%d hourly candles %s .. %s" % (len(df), df.index[0], df.index[-1])
+
+
+def read_logs():
+    """Spreads the bot actually used ([FRICTION] ... used=) and the live proofs ([NS-PROOF]) since B12."""
+    fr, proofs = collections.defaultdict(list), []
+    rx_f = re.compile(r"\[FRICTION\] (\w+)\b.*?used=([0-9.]+)")
+    rx_p = re.compile(r"\[NS-PROOF\] (\w+): \w+ \w+ dir=([+-]\d) R2=([-0-9.e+]+) entry=([-0-9.e+]+).*\((\w+), "
+                      r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\)")
+    files = sorted(glob.glob(os.path.join("logs", "trading_bot.log*")), key=os.path.getmtime)[-5:]
+    for f in files:
+        try:
+            fh = open(f, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if "[FRICTION]" in line:
+                    m = rx_f.search(line)
+                    if m:
+                        fr[m.group(1)].append(float(m.group(2)))
+                elif "[NS-PROOF]" in line:
+                    m = rx_p.search(line)
+                    if m:
+                        proofs.append((m.group(1), int(m.group(2)), float(m.group(3)), float(m.group(4)), pd.Timestamp(m.group(6))))
+    return {a: float(np.median(v)) for a, v in fr.items() if v}, sorted(set(proofs), key=lambda x: x[4])
+
+
+def lot_values():
+    """US dollars per 1.0 price move at the smallest lot, read from MT5 (fallback table if MT5 is not reachable),
+    and each market's live spread as a fraction of price (used when the log has no [FRICTION] lines for it)."""
+    out, spreads = {}, {}
+    try:
+        import MetaTrader5 as mt5
+        if not mt5.initialize():
+            raise RuntimeError(mt5.last_error())
+        for a, sym in MARKETS.items():
+            mt5.symbol_select(sym, True)
+            si = mt5.symbol_info(sym)
+            if si is None:
+                continue
+            tk0 = mt5.symbol_info_tick(sym)
+            if tk0 is not None and tk0.bid > 0 and tk0.ask > tk0.bid:
+                spreads[a] = (tk0.ask - tk0.bid) / ((tk0.ask + tk0.bid) / 2.0)
+            units, ccy, rate = float(si.volume_min) * float(si.trade_contract_size), si.currency_profit, 1.0
+            if ccy != "USD":
+                rate = None
+                for s2, inv in ((ccy + "USDm", False), ("USD" + ccy + "m", True)):
+                    mt5.symbol_select(s2, True)
+                    tk = mt5.symbol_info_tick(s2)
+                    if tk is not None and tk.bid > 0:
+                        rate = (1.0 / tk.bid) if inv else tk.bid
+                        break
+            if rate:
+                out[a] = (units * rate, "MT5 %g lot x %g = %g units, profit in %s" % (si.volume_min, si.trade_contract_size, units, ccy))
+        mt5.shutdown()
+    except Exception as e:
+        say("   MT5 not reachable (%s) -- using the fallback lot table" % e)
+    for a in MARKETS:
+        out.setdefault(a, (FALLBACK_USD[a], "fallback table"))
+    return out, spreads
+
+
+def run_engine(M, asset, df1, pcfg):
+    """One full replay. Returns (the engine's own entries, every setup's life as it ended, setups still alive)."""
+    eng = M.NSEngine(asset)
+    ends = []
+    orig = M.NSEngine._end
+
+    def _end(self, st, s, reason, emit, t):
+        ends.append((dict(s), reason, t))
+        return orig(self, st, s, reason, emit, t)
+    eng._end = types.MethodType(_end, eng)
+    out = eng.update(M.NSEngine.new_state(), df1, None, pcfg=pcfg, now=df1.index[-1] + pd.Timedelta(hours=1))
+    alive = [dict(s) for s in out["state"]["setups"]]
+    return list(out.get("missed") or []) + list(out.get("proofs") or []), ends, alive
+
+
+def arrays(df1, hourly, M):
+    t1 = df1.index + pd.Timedelta(hours=1)
+    A = dict(t1=t1, op=df1["open"].values, hi=df1["high"].values, lo=df1["low"].values, cl=df1["close"].values, n=len(df1))
+    A["pos"] = dict(zip(t1, range(len(t1))))
+    A["kill"] = (lambda i: True) if hourly else (lambda i: t1[i].hour % 4 == 0)
+    A["atr"] = M.atr14(A["hi"], A["lo"], A["cl"])          # the same hourly move size the engine uses
+    return A
+
+
+def stop_for(M, cfg, d, e, r2, atr, struct, k):
+    """Today's stop (k None) or the structure stop: behind the structure point by k moves; same floor and cap."""
+    if k is None:
+        return M.ns_levels(d, e, r2, atr, cfg["min_sl_pct"], cfg["target_atr"])
+    stop = struct - d * k * atr
+    floor = float(cfg["min_sl_pct"] or 0.0) * e
+    if abs(e - stop) < floor:
+        stop = e - d * floor
+    if abs(e - stop) > M.STOP_CAP_ATR * atr:
+        stop = e - d * M.STOP_CAP_ATR * atr
+    if (d == 1 and stop >= e) or (d == -1 and stop <= e):
+        return None, None
+    tgt = (e + d * float(cfg["target_atr"]) * atr) if cfg["target_atr"] else None
+    return stop, tgt
+
+
+def gated(M, cfg, s, style, e, atr, stop, strength):
+    """The engine's own entry gates (_candidate), applied to every entry with its own stop."""
+    d, r2 = s["d"], s["r2"]
+    if not (atr == atr and atr > 0) or d * (e - r2) / atr > M.FRESH_ATR:
+        return False
+    if stop is None or not M.gate_rr_ok(e, stop, atr, cfg["min_rr"]):
+        return False
+    if cfg.get("cont_only") and s["kind"] != "continuation":
+        return False
+    if cfg.get("no_spike") and style != "B" and strength > M.SPIKE:
+        return False
+    return True
+
+
+def retest_triggers(M, s, A):
+    """From the retest touch on: E (close past the peak), CT (close past the retest candle), H (first close the
+    trade's way). Stops when the setup dies (a 4H close past R1) or the trigger wait runs out."""
+    tt = s.get("t_touch")
+    it = A["pos"].get(pd.Timestamp(tt)) if tt is not None else None
+    if it is None:
+        return {}
+    d, r1, r2, edge = s["d"], s["r1"], s["r2"], s["edge"]
+    h2 = float(s.get("h2_frozen", s.get("h2")))
+    op, hi, lo, cl, t1, n = A["op"], A["hi"], A["lo"], A["cl"], A["t1"], A["n"]
+    got, k = {}, it
+    if d * (cl[it] - r2) > 0:                    # RC1: the first retest candle closed past the line -- the break held
+        got["RC1"] = it
+    for i in range(it, n):
+        if i > it:
+            if A["kill"](i) and ((d == 1 and cl[i] < r1) or (d == -1 and cl[i] > r1)):
+                break
+            if t1[i] - pd.Timestamp(tt) > M.WAIT_TRIGGER:
+                break
+        c = cl[i]
+        if "H" not in got and d * (c - op[i]) > 0:
+            got["H"] = i
+        if "RC" not in got and d * (c - r2) > 0 and ((d == 1 and lo[i] <= edge + M.TOUCH_ATR * A["atr"][i]) or
+                                                     (d == -1 and hi[i] >= edge - M.TOUCH_ATR * A["atr"][i])):
+            got["RC"] = i                        # RC: a retest candle (back at the zone) that closed past the line
+        if i > it:
+            if "E" not in got and d * (c - h2) > 0:
+                got["E"] = i
+            if (lo[i] < lo[k]) if d == 1 else (hi[i] > hi[k]):
+                k = i
+            elif "CT" not in got and d * (c - (hi[k] if d == 1 else lo[k])) > 0:
+                got["CT"] = i
+        if all(x in got for x in ("H", "E", "CT", "RC")):
+            break
+    return {st: (i, (float(lo[it:i + 1].min()) if d == 1 else float(hi[it:i + 1].max()))) for st, i in got.items()}
+
+
+def sim_trade(M, A, d, i, e, stop, target, struct, runner):
+    hi, lo, cl, n = A["hi"], A["lo"], A["cl"], A["n"]
+    risk0, cur, armed, peak, broke = abs(e - stop), stop, False, None, False
+    last = min(n - 1, i + M.TRADE_BARS)
+    for j in range(i + 1, last + 1):
+        if (d == 1 and lo[j] < struct) or (d == -1 and hi[j] > struct):
+            broke = True
+        if (d == 1 and lo[j] <= cur) or (d == -1 and hi[j] >= cur):
+            return j, cur, "stop", broke, risk0
+        if target is not None and ((d == 1 and hi[j] >= target) or (d == -1 and lo[j] <= target)):
+            return j, target, "target", broke, risk0
+        if runner:
+            a0 = max(0, j - 260)
+            ns_, armed, peak, _w = M.runner_step(d, e, cur, risk0, hi[a0:j + 1], lo[a0:j + 1], cl[a0:j + 1], j - i, armed, peak)
+            if ns_ is not None:
+                cur = ns_
+    return last, float(cl[last]), "time", broke, risk0
+
+
+def book(M, A, cands, runner, cost, usd):
+    """One position at a time: take each entry only after the previous trade has closed."""
+    rows, free_at = [], -1
+    for i, e, stop, tgt, struct, d in sorted(cands, key=lambda x: x[0]):
+        if i <= free_at:
+            continue
+        j, px, why, broke, risk0 = sim_trade(M, A, d, i, e, stop, tgt, struct, runner)
+        pts = d * (px - e) - cost * e
+        rows.append(dict(t=A["t1"][j], money=pts * usd, R=pts / risk0 if risk0 > 0 else 0.0, inside=not broke,
+                         noise=(why == "stop" and not broke)))
+        free_at = j
+    return rows
+
+
+def stats(rows, t0, t1):
+    rows = sorted(rows, key=lambda r: r["t"])
+    mid = t0 + (t1 - t0) / 2
+    weeks = max((t1 - t0).total_seconds() / 604800.0, 1e-9)
+    m = [r["money"] for r in rows]
+    eq = np.concatenate([[0.0], np.cumsum(m)]) if m else np.array([0.0])
+    dd = float(np.max(np.maximum.accumulate(eq) - eq))
+    run = worst = 0.0
+    for x in m:
+        run = run + x if x < 0 else 0.0
+        worst = min(worst, run)
+    h1 = sum(r["money"] for r in rows if r["t"] < mid)
+    h2 = sum(r["money"] for r in rows if r["t"] >= mid)
+    losers = [r for r in rows if r["money"] < 0]
+    return dict(n=len(rows), win=(100.0 * sum(1 for x in m if x > 0) / len(m)) if m else 0.0, net=sum(m) / weeks,
+                lost=sum(-x for x in m if x < 0) / weeks, big=min(m + [0.0]), run=worst, dd=dd, h1=h1, h2=h2,
+                inside=(100.0 * sum(1 for r in rows if r["inside"]) / len(rows)) if rows else 0.0,
+                noise=sum(1 for r in losers if r["noise"]), losers=len(losers),
+                R=(sum(r["R"] for r in rows) / len(rows)) if rows else 0.0, ok=bool(rows) and h1 > 0 and h2 > 0)
+
+
+def line(name, s):
+    return ("%-15s %5d %5.0f%% %+9.2f %9.2f %9.2f %10.2f %8.2f %+10.2f %+10.2f %6.0f%% %+6.2f  %s" %
+            (name, s["n"], s["win"], s["net"], s["lost"], s["big"], s["run"], s["dd"], s["h1"], s["h2"], s["inside"],
+             s["R"], "PASS" if s["ok"] else "-"))
+
+
+HEAD = ("variant         trades  win   net$/wk  lost$/wk  biggest$  worstrun$  maxDD$   1st-half$  2nd-half$ inside   R/tr  "
+        "(PASS = made money in both halves)")
+
+
+
+PIV = {}
+
+NEAR = 0.5            # a bigger 4H level this close ahead (in 4H moves): the push must also close past it
+AHEAD_DAYS = 60
+MAJOR_K = 6
+FAR = 2.5             # an entry further than this from the broken line (in 1H moves) is a far entry
+HL_FLOOR = 1.0        # far-entry stop (last 30m higher low): never closer than 1 move ...
+HL_CAP = 3.0          # ... and a far entry whose stop would be wider than 3 moves is not taken
+ROWS = [  # (name, routing, version, hours, far stop, majority, 1-move floor, lines on wicks, majority on trades at once)
+    ("Package A (B13)", "near", "A", 24, "HL", True, True, False, False)]
+CEIL_BACK = {"D1": 180, "W1": 3 * 365}
+ORDER = ["TODAY", "E", "E skip-near"] + [r[0] for r in ROWS]
+FOCUS = ["E", "E skip-near", "Package A (B13)"]
+
+
+def mt5_frames(sym):
+    """30-minute, daily and weekly candles straight from MT5 (count-based: no local-time conversion). Empty when MT5
+    is not reachable -- daily/weekly are then built from the hourly file and the package runs on 1H closes only."""
+    out = {}
+    try:
+        import MetaTrader5 as mt5
+        if not mt5.initialize():
+            return out
+        mt5.symbol_select(sym, True)
+        for name, tf, n in (("M30", mt5.TIMEFRAME_M30, 30000), ("D1", mt5.TIMEFRAME_D1, 2500), ("W1", mt5.TIMEFRAME_W1, 700)):
+            r = mt5.copy_rates_from_pos(sym, tf, 0, n)
+            if r is None or len(r) == 0:
+                continue
+            f = pd.DataFrame(r)
+            f.index = pd.to_datetime(f["time"], unit="s")
+            out[name] = f[["open", "high", "low", "close"]].astype(float)
+    except Exception:
+        pass
+    return out
+
+
+class TF:
+    """One timeframe's candles, with what the tide check needs worked out once."""
+    def __init__(self, M, df, hours):
+        self.df = df
+        self.end_ts = df.index + pd.Timedelta(hours=hours)          # each candle's close time
+        self.end = self.end_ts.values
+        self.cl, self.hi, self.lo = df["close"].values, df["high"].values, df["low"].values
+        self.atr = M.atr14(self.hi, self.lo, self.cl)
+        self.ema = {n: pd.Series(self.cl).ewm(span=n, adjust=False).mean().values for n in (20, 50, 200)}
+
+    def last_closed(self, ts):
+        return int(np.searchsorted(self.end, np.datetime64(ts), side="right")) - 1
+
+    def barriers(self, d, e, ts):
+        """Lines and EMAs of this timeframe sitting just ahead of the trade -- within one of its own moves.
+        None = not enough candles to judge."""
+        k = self.last_closed(ts)
+        if k < 30:
+            return None
+        a = float(self.atr[k])
+        if not (a == a and a > 0):
+            return None
+        hits = []
+        for n in (20, 50, 200):
+            if k + 1 >= n:
+                v = float(self.ema[n][k])
+                if 0 < d * (v - e) <= a:
+                    hits.append("EMA%d" % n)
+        cl = self.cl
+        for x in range(k - 2, max(1, k - 60), -1):               # swing closes confirmed by candle k, newest first
+            w = cl[x - 2:x + 3]
+            if len(w) == 5 and ((d == 1 and cl[x] == w.max()) or (d == -1 and cl[x] == w.min())) \
+                    and 0 < d * (cl[x] - e) <= a:
+                hits.append("line")
+                break
+        return hits
+
+
+class Levels:
+    """The engine's own 4H swing closes, with what the two bigger-level rules need."""
+    def __init__(self, M, d4):
+        self.end = (d4.index + pd.Timedelta(hours=4)).values
+        self.c4 = d4["close"].values
+        self.atr4 = M.atr14(d4["high"].values, d4["low"].values, self.c4)
+        K, c = M.K, self.c4
+        self.sw, self.bylevel = [], collections.defaultdict(list)
+        for i in range(K, len(c) - K):
+            w = c[i - K:i + K + 1]
+            for typ, hit in (("H", c[i] == w.max()), ("L", c[i] == w.min())):
+                if hit:
+                    edge = float(d4["high"].values[i - K:i + K + 1].max() if typ == "H" else d4["low"].values[i - K:i + K + 1].min())
+                    self.sw.append((self.end[i + K], typ, float(c[i]), i, edge))
+                    self.bylevel[(typ, round(float(c[i]), 8))].append((pd.Timestamp(self.end[i + K]), i))
+        self.conf = np.array([x[0] for x in self.sw])
+        # swing highs / lows on the WICKS (the high / low itself, 2 candles either side)
+        h4, l4 = d4["high"].values, d4["low"].values
+        self.swh = []
+        for i in range(K, len(c) - K):
+            if h4[i] == h4[i - K:i + K + 1].max():
+                self.swh.append((self.end[i + K], "H", float(h4[i]), i))
+            if l4[i] == l4[i - K:i + K + 1].min():
+                self.swh.append((self.end[i + K], "L", float(l4[i]), i))
+        self.confh = np.array([x[0] for x in self.swh])
+
+    def ahead_wick(self, d, e, t):
+        """The nearest swing HIGH (a buy) / LOW (a sell) by wick ahead of price, known by time t: (level, distance in 4H moves)."""
+        typ = "H" if d == 1 else "L"
+        top = int(np.searchsorted(self.confh, np.datetime64(t), side="right"))
+        t0 = np.datetime64(pd.Timestamp(t) - pd.Timedelta(days=AHEAD_DAYS))
+        a = self.atr_at(t)
+        best = None
+        for x in range(top - 1, -1, -1):
+            cf, ty, lv, _i = self.swh[x]
+            if cf < t0:
+                break
+            if ty == typ and d * (lv - e) > 0 and (best is None or d * (lv - e) < d * (best - e)):
+                best = lv
+        if best is None or not (a == a and a > 0):
+            return None, None
+        return best, d * (best - e) / a
+
+    def atr_at(self, t):
+        k = int(np.searchsorted(self.end, np.datetime64(t), side="right")) - 1
+        return float(self.atr4[k]) if k >= 0 else float("nan")
+
+    def ahead(self, d, e, t):
+        """Distance (in 4H moves) to the nearest bigger 4H level ahead of price, known by time t (None if none)."""
+        typ = "H" if d == 1 else "L"
+        top = int(np.searchsorted(self.conf, np.datetime64(t), side="right"))
+        t0 = np.datetime64(pd.Timestamp(t) - pd.Timedelta(days=AHEAD_DAYS))
+        best = None
+        for x in range(top - 1, -1, -1):
+            cf, ty, lv, _i, _e = self.sw[x]
+            if cf < t0:
+                break
+            if ty == typ and d * (lv - e) > 0 and (best is None or d * (lv - e) < best):
+                best = d * (lv - e)
+        a = self.atr_at(t)
+        return None if best is None or not (a == a and a > 0) else best / a
+
+    def ahead_level(self, d, e, t, beyond=0.0):
+        """The nearest bigger 4H level ahead of price (known by time t): (level, wick edge, distance in 4H moves)."""
+        typ = "H" if d == 1 else "L"
+        top = int(np.searchsorted(self.conf, np.datetime64(t), side="right"))
+        t0 = np.datetime64(pd.Timestamp(t) - pd.Timedelta(days=AHEAD_DAYS))
+        a = self.atr_at(t)
+        best = None
+        for x in range(top - 1, -1, -1):
+            cf, ty, lv, _i, ed = self.sw[x]
+            if cf < t0:
+                break
+            if ty == typ and d * (lv - e) > beyond * (a if a == a else 0) and (best is None or d * (lv - e) < d * (best[0] - e)):
+                best = (lv, ed)
+        if best is None or not (a == a and a > 0):
+            return None, None, None
+        return best[0], best[1], d * (best[0] - e) / a
+
+    def major(self, conf, d, r2, t):
+        """Is the line a major swing (highest/lowest 4H close for MAJOR_K candles each side), known by time t?
+        A setup is born when the opposite swing confirms (its `conf`), so the line's own swing is the latest swing of
+        the line's type at exactly that level confirmed no later than that."""
+        cands = [x for x in self.bylevel.get(("H" if d == 1 else "L", round(float(r2), 8)), []) if x[0] <= pd.Timestamp(conf)]
+        if not cands:
+            return None
+        i = max(cands, key=lambda x: x[0])[1]
+        if i + MAJOR_K >= len(self.c4) or self.end[i + MAJOR_K] > np.datetime64(t):
+            return False                                   # not proven major by the time of the signal
+        w = self.c4[max(0, i - MAJOR_K):i + MAJOR_K + 1]
+        return bool(self.c4[i] == (w.max() if d == 1 else w.min()))
+
+
+def atr41(M, A, i):
+    return float(M.atr14(A["hi"][max(0, i - 40):i + 1], A["lo"][max(0, i - 40):i + 1], A["cl"][max(0, i - 40):i + 1])[-1])
+
+
+class Bigger:
+    """Weekly or daily direction evidence (Desire, 2 Oct): EMA 50/200 (no 20), swing structure (the 4H lines' swing
+    rule on this timeframe's closes) and a diagonal line through the last two swing points, valid once a third point
+    touched it. The timeframe is WITH the trade when 2 of the 3 agree."""
+    def __init__(self, df, step):
+        self.end = (df.index + step).values
+        self.c, self.h, self.l = df["close"].values, df["high"].values, df["low"].values
+        s = pd.Series(self.c)
+        self.e50 = s.ewm(span=50, adjust=False).mean().values
+        self.e200 = s.ewm(span=200, adjust=False).mean().values
+        h, l, c = self.h, self.l, self.c
+        tr = np.maximum(h[1:] - l[1:], np.maximum(abs(h[1:] - c[:-1]), abs(l[1:] - c[:-1])))
+        self.atr = pd.Series(np.r_[h[0] - l[0], tr]).rolling(14, min_periods=1).mean().values
+        self.sw = []
+        for i in range(2, len(c) - 2):
+            w = c[i - 2:i + 3]
+            if c[i] == w.max():
+                self.sw.append((i, float(c[i]), "H"))
+            if c[i] == w.min():
+                self.sw.append((i, float(c[i]), "L"))
+
+    def read(self, t, d):
+        n = int(np.searchsorted(self.end, np.datetime64(pd.Timestamp(t)), side="right")) - 1
+        if n < 30:
+            return 0
+        c = self.c
+        last = c[n]
+        ema = 1 if (last > self.e50[n] and self.e50[n] > self.e200[n]) else -1 if (last < self.e50[n] and self.e50[n] < self.e200[n]) else 0
+        sw = [x for x in self.sw if x[0] + 2 <= n]
+        H = [x for x in sw if x[2] == "H"]
+        L = [x for x in sw if x[2] == "L"]
+        hor = 0
+        if len(H) >= 2 and len(L) >= 2:
+            up = (H[-1][1] > H[-2][1] and L[-1][1] > L[-2][1]) or last > H[-1][1]
+            dn = (H[-1][1] < H[-2][1] and L[-1][1] < L[-2][1]) or last < L[-1][1]
+            hor = 1 if up and not dn else -1 if dn and not up else 0
+        a = self.atr[n]
+
+        def diag(pts, kind):
+            if len(pts) < 3:
+                return None
+            (i1, v1, _), (i2, v2, _) = pts[-2], pts[-1]
+            if (kind == "L" and v2 <= v1) or (kind == "H" and v2 >= v1) or i2 == i1:
+                return None
+            slope = (v2 - v1) / (i2 - i1)
+            third = any(abs(v - (v1 + slope * (i - i1))) <= 0.5 * a for i, v, _ in pts[:-2][-4:]) or \
+                any(abs(c[j] - (v1 + slope * (j - i1))) <= 0.5 * a for j in range(i2 + 3, n + 1))
+            return (v1 + slope * (n - i1)) if third else None
+        sup, res = diag(L, "L"), diag(H, "H")
+        dia = 1 if (sup is not None and last > sup) else -1 if (res is not None and last < res) else 0
+        v = [ema, hor, dia] if d == 1 else [-ema, -hor, -dia]
+        return 1 if v.count(1) >= 2 else -1 if v.count(-1) >= 2 else 0
+
+
+
+class Ceilings:
+    """E4 (Desire, 2 Oct morning: the barrier check): daily or weekly lines and averages sitting right in the way.
+    Swing closes (2 candles either side, highs for a buy and lows for a sell) and the 50/200 EMAs, known by time t."""
+    def __init__(self, df, span, back_days):
+        self.end = (df.index + span).values
+        c = df["close"].astype(float).values
+        sr = pd.Series(c)
+        self.e50 = sr.ewm(span=50, adjust=False).mean().values
+        self.e200 = sr.ewm(span=200, adjust=False).mean().values
+        self.back = pd.Timedelta(days=back_days)
+        self.sw = []
+        for i in range(2, len(c) - 2):
+            w = c[i - 2:i + 3]
+            if c[i] == w.max():
+                self.sw.append((self.end[i + 2], "H", float(c[i])))
+            if c[i] == w.min():
+                self.sw.append((self.end[i + 2], "L", float(c[i])))
+        self.conf = np.array([x[0] for x in self.sw]) if self.sw else np.array([], dtype="datetime64[ns]")
+
+    def ahead(self, d, e, t):
+        tt = np.datetime64(pd.Timestamp(t))
+        out = []
+        k = int(np.searchsorted(self.end, tt, side="right")) - 1
+        if k >= 200:
+            for v in (self.e50[k], self.e200[k]):
+                if d * (v - e) > 0:
+                    out.append(float(v))
+        top = int(np.searchsorted(self.conf, tt, side="right"))
+        t0 = np.datetime64(pd.Timestamp(t) - self.back)
+        typ = "H" if d == 1 else "L"
+        for x in range(top - 1, -1, -1):
+            cf, ty, lv = self.sw[x]
+            if cf < t0:
+                break
+            if ty == typ and d * (lv - e) > 0:
+                out.append(lv)
+        return out
+
+
+class Thirty:
+    """MT5 30-minute candles (UTC, same clock as the bot's 1H file)."""
+    def __init__(self, df):
+        self.open_t = df.index.values
+        self.t = df.index + pd.Timedelta(minutes=30)
+        self.tv = self.t.values
+        self.o, self.h, self.l, self.c = (df[x].values for x in ("open", "high", "low", "close"))
+        self.e20 = pd.Series(self.c).ewm(span=20, adjust=False).mean().values
+        self.n = len(self.c)
+
+
+def strong4h(F4, t, d):
+    k = F4.last_closed(t)
+    if k < 50:
+        return False
+    c, e20, e50 = F4.cl[k], F4.ema[20][k], F4.ema[50][k]
+    return (c > e20 and e20 > e50) if d == 1 else (c < e20 and e20 < e50)
+
+
+def judge(A, T, F4, d, start, r2, r1, trig, level, ver, hours, double):
+    """The package on the lower timeframes, checked at every 30m close from `start`. -> (outcome, 30m index, how)"""
+    t1v, c1 = A["t1"].values, A["cl"]
+    start = pd.Timestamp(start)
+    k0 = int(np.searchsorted(T.tv, np.datetime64(start)))
+    for k in range(max(3, k0), T.n):
+        tau = T.t[k]
+        if tau - start > pd.Timedelta(hours=hours):
+            return "expired", None, ""
+        j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+        if j1 < 1:
+            continue
+        last1h, t_last1h = c1[j1], A["t1"][j1]
+        k4 = F4.last_closed(tau)
+        if k4 >= 0 and F4.end_ts[k4] > start and d * (F4.cl[k4] - r1) < 0:
+            return "died", None, ""
+        p, q = T.c[k - 1], T.c[k]
+        if (t_last1h > start and d * (last1h - r2) < 0) or (d * (p - r2) < 0 and d * (q - r2) < 0):
+            return "weak", None, ""
+        two = (not double) or d * (c1[j1 - 1] - level) > 0
+        if d * (last1h - level) > 0 and d * (p - level) > 0 and d * (q - level) > 0 and d * (q - p) >= 0 and two:
+            return "enter", k, "strict"
+        if ver in ("B", "C", "MID"):
+            st4 = tau.floor("4h")
+            if st4 == tau:
+                st4 = tau - pd.Timedelta(hours=4)
+            klo = int(np.searchsorted(T.open_t, np.datetime64(st4)))
+            if k - klo >= 1:
+                o4, h4, l4 = T.o[klo], T.h[klo:k + 1].max(), T.l[klo:k + 1].min()
+                rng = max(h4 - l4, 1e-12)
+                s4 = (q > o4 and (q - l4) / rng >= 0.67) if d == 1 else (q < o4 and (h4 - q) / rng >= 0.67)
+                ls = T.l[k - 2:k + 1] if d == 1 else T.h[k - 2:k + 1]
+                stair = (ls[0] < ls[1] < ls[2]) if d == 1 else (ls[0] > ls[1] > ls[2])
+                above = d * (q - T.e20[k]) > 0 and d * (T.e20[k] - T.e20[k - 2]) > 0
+                need = r2 if ver == "C" else trig
+                ok1 = d * (last1h - need) > 0 and ((not double) or d * (c1[j1 - 1] - need) > 0)
+                if ver == "MID":
+                    ok1 = ok1 and d * (q - level) > 0      # middle way: only once past the wall
+                if s4 and stair and above and ok1:
+                    return "enter", k, "re-read"
+    return "watching", None, ""
+
+
+def place_stop(M, T, cfg, d, k, q, r2, t_touch, atr, far_stop, floor1=False):
+    """0.3 of a 1H move behind the push's extreme since the retest; a far entry may use the last 30m higher low
+    (never closer than HL_FLOOR moves; not taken if wider than HL_CAP moves)."""
+    k_lo = int(np.searchsorted(T.open_t, np.datetime64(pd.Timestamp(t_touch) - pd.Timedelta(hours=1))))
+    seg = T.l[k_lo:k + 1] if d == 1 else T.h[k_lo:k + 1]
+    if len(seg) == 0:
+        return None, "no structure"
+    stop = (seg.min() if d == 1 else seg.max()) - d * 0.3 * atr
+    if d * (q - r2) / atr > FAR and far_stop == "HL":
+        piv = [seg[i] for i in range(1, len(seg) - 1)
+               if ((seg[i] <= seg[i - 1] and seg[i] <= seg[i + 1]) if d == 1 else (seg[i] >= seg[i - 1] and seg[i] >= seg[i + 1]))]
+        if piv:
+            stop = piv[-1] - d * 0.3 * atr
+        if d * (q - stop) < HL_FLOOR * atr:
+            stop = q - d * HL_FLOOR * atr
+        if d * (q - stop) > HL_CAP * atr:
+            return None, "far entry, stop wider than 3 moves"
+    if floor1 and d * (q - stop) < HL_FLOOR * atr:
+        stop = q - d * HL_FLOOR * atr                 # breathing space: never closer than 1 move (live since B13)
+    floor = float(cfg.get("min_sl_pct") or 0.0) * q
+    if d * (q - stop) < floor:
+        stop = q - d * floor
+    if d * (q - stop) > M.STOP_CAP_ATR * atr:
+        stop = q - d * M.STOP_CAP_ATR * atr
+    if d * (q - stop) <= 0:
+        return None, "stop on the wrong side"
+    return stop, ""
+
+
+def sim30(M, A, T, d, k, q, stop, tgt, runner):
+    """One trade on the 30m candles: stop, target, the 7-day limit; BTC's runner trails on each 1H close."""
+    risk0, cur, armed, peak = abs(q - stop), stop, False, None
+    t0 = T.t[k]
+    for kk in range(k + 1, T.n):
+        hi, lo = T.h[kk], T.l[kk]
+        if (d == 1 and lo <= cur) or (d == -1 and hi >= cur):
+            return kk, cur, risk0
+        if tgt is not None and ((d == 1 and hi >= tgt) or (d == -1 and lo <= tgt)):
+            return kk, tgt, risk0
+        tau = T.t[kk]
+        hrs = (tau - t0).total_seconds() / 3600.0
+        if hrs >= M.TRADE_BARS:
+            return kk, T.c[kk], risk0
+        if runner and tau.minute == 0:
+            j = A["pos"].get(tau)
+            if j is not None:
+                a0 = max(0, j - 260)
+                ns_, armed, peak, _w = M.runner_step(d, q, cur, risk0, A["hi"][a0:j + 1], A["lo"][a0:j + 1], A["cl"][a0:j + 1],
+                                                     int(hrs), armed, peak)
+                if ns_ is not None:
+                    cur = ns_
+    return T.n - 1, T.c[-1], risk0
+
+
+def book30(M, A, T, cands, runner, cost, usd):
+    """One position per market at a time, priced on the 30m candles."""
+    rows, free = [], -1
+    for c in sorted(cands, key=lambda x: x["k"]):
+        if c["k"] <= free:
+            continue
+        kk, px, risk0 = sim30(M, A, T, c["d"], c["k"], c["q"], c["stop"], c["tgt"], runner)
+        pts = c["d"] * (px - c["q"]) - cost * c["q"]
+        rows.append(dict(t=T.t[kk], money=pts * usd, R=pts / risk0 if risk0 > 0 else 0.0, inside=False, noise=False,
+                         delay=c.get("delay"), give=c.get("give")))
+        free = kk
+    return rows
+
+
+def run(data, frames, pcfg, costs, lots, live_proofs):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nTHE LIVE PACKAGE (B13-PKG) -- every market, judged on the real 30m and 1H closes\n" + "=" * 110)
+    allrows, spans, per = collections.defaultdict(list), [], {}
+    tally = collections.defaultdict(collections.Counter)
+    e_match = e_eng = e_mine = 0
+    for a, df1 in data.items():
+        t_a = time.time()
+        cfg = M.market_settings(a, pcfg)
+        if cfg is None:
+            continue
+        fr = frames.get(a, {})
+        if fr.get("M30") is None or len(fr["M30"]) < 1000:
+            say("   %-7s no 30m candles from MT5 -- the package can't be judged here; market skipped" % a)
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd = costs.get(a, 0.0005), lots[a][0]
+        runner = cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        live, _e, _a = run_engine(M, a, df1, pcfg)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        cfgE = M.market_settings(a, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        CD, CW = Ceilings(D1, pd.Timedelta(days=1), CEIL_BACK["D1"]), Ceilings(W1, pd.Timedelta(days=7), CEIL_BACK["W1"])
+
+        def dw_ceil(d0, e0, t0):
+            """Daily/weekly ceilings within half a 4H move ahead of price."""
+            a4 = L.atr_at(t0)
+            if not (a4 == a4 and a4 > 0):
+                return []
+            return [v for v in CD.ahead(d0, e0, t0) + CW.ahead(d0, e0, t0) if d0 * (v - e0) <= NEAR * a4]
+        V = collections.defaultdict(list)
+        eng_by = {int(p["fields"]["ns_setup_id"]): p["fields"] for p in engE}
+
+        def at_once(f):
+            tc = pd.Timestamp(f["ns_candle"])
+            k = int(np.searchsorted(T.tv, np.datetime64(tc)))
+            if k >= T.n or T.t[k] != tc or f.get("ns_stop") is None:
+                return None
+            return dict(k=k, q=float(f["ns_close"]), stop=float(f["ns_stop"]), tgt=f.get("ns_target"), d=int(f["setup_dir"]))
+        for name, fl in (("TODAY", [p["fields"] for p in live]), ("E", [p["fields"] for p in engE])):
+            for f in fl:
+                c = at_once(f)
+                if c is None:
+                    tally[name]["no 30m candle at the entry"] += 1
+                else:
+                    V[name].append(c)
+        for f in (p["fields"] for p in engE):
+            tc, d0, e0 = pd.Timestamp(f["ns_candle"]), int(f["setup_dir"]), float(f["ns_close"])
+            lvl, _ed, near = L.ahead_level(d0, e0, tc)
+            n4 = lvl is not None and near is not None and near <= NEAR
+            wl0, wn0 = L.ahead_wick(d0, e0, tc)
+            nw = wl0 is not None and wn0 is not None and wn0 <= NEAR
+            c = at_once(f)
+            for nm, skip in (("E skip-near", n4), ("E skip wicks", nw)):
+                if skip:
+                    tally[nm]["skipped (a 4H line just ahead%s)" % (", by wicks" if nm != "E skip-near" else "")] += 1
+                elif c is not None:
+                    V[nm].append(c)
+                    tally[nm]["taken at once"] += 1
+        mineE = {}
+        t1v = A["t1"].values
+        for sid, s in setups.items():
+            d = s["d"]
+            trig = retest_triggers(M, s, A)
+            if "E" in trig:
+                i, struct = trig["E"]
+                e = float(A["cl"][i])
+                atr = atr41(M, A, i)
+                strength = M.candle_strength(d, A["hi"][i], A["lo"][i], A["cl"][i])
+                stopE, _t = stop_for(M, cfgE, d, e, s["r2"], atr, struct, None)
+                if gated(M, cfgE, s, "E", e, atr, stopE, strength):
+                    mineE[sid] = i
+            if "E" not in trig or (cfg.get("cont_only") and s["kind"] != "continuation"):
+                continue
+            iE = trig["E"][0]
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            trg = float(s.get("h2_frozen", s.get("h2")))
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            lvl, _ed, near = L.ahead_level(d, eE, tE)
+            is_near = lvl is not None and near is not None and near <= NEAR
+            level = (max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg
+            f = eng_by.get(sid)
+            took = f is not None and A["pos"].get(pd.Timestamp(f["ns_candle"])) == iE
+            aE = atr41(M, A, iE)
+            far_ref = (not took) and aE == aE and aE > 0 and d * (eE - r2) / aE > M.FRESH_ATR
+            nmaj = None
+            wl, wn = L.ahead_wick(d, eE, tE)
+            near_w = wl is not None and wn is not None and wn <= NEAR
+            level_w = (max(trg, wl) if d == 1 else min(trg, wl)) if near_w else trg
+            for name, scope, ver, hrs, fstop, maj, floor1, wick, majall in ROWS:
+                nr, lev = (near_w, level_w) if wick else (is_near, level)
+                tally[name]["signals"] += 1
+                if scope == "near" and not nr and not far_ref:
+                    c = at_once(f) if took else None
+                    if c is None:
+                        tally[name]["refused by the engine"] += 1
+                        continue
+                    if majall:
+                        if nmaj is None:
+                            nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                        if nmaj < 2:
+                            tally[name]["space to run, but no bigger-timeframe majority -- not taken"] += 1
+                            continue
+                    V[name].append(c)
+                    tally[name]["taken at once (space to run)"] += 1
+                    continue
+                tally[name]["judged by the package"] += 1
+                if maj:
+                    if nmaj is None:
+                        nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                    if nmaj < 2:
+                        tally[name]["no bigger-timeframe majority"] += 1
+                        continue
+                out, k, how = judge(A, T, F4, d, tE, r2, r1, trg, lev, ver, hrs, False)
+                if out != "enter":
+                    tally[name][{"weak": "cancelled (weak)", "died": "cancelled (setup died)", "expired": "expired (still dithering)",
+                                 "watching": "still watching at the end"}[out]] += 1
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr = atr41(M, A, j1)
+                if not (atr == atr and atr > 0):
+                    tally[name]["no move size"] += 1
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr, fstop, floor1)
+                if stop is None:
+                    tally[name]["not taken: " + why] += 1
+                    continue
+                if not M.gate_rr_ok(q, stop, atr, cfg["min_rr"]):
+                    tally[name]["not taken: reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr
+                far = d * (q - r2) / atr > FAR
+                tally[name]["entered (%s%s)" % (how, ", far" if far else "")] += 1
+                V[name].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d, delay=(tau - tE).total_seconds() / 3600.0,
+                                    give=d * (q - eE) / atr))
+        eng_ids = {int(p["fields"]["ns_setup_id"]): A["pos"].get(pd.Timestamp(p["fields"]["ns_candle"])) for p in engE}
+        e_eng += len(eng_ids)
+        e_mine += len(mineE)
+        e_match += sum(1 for sid, i in eng_ids.items() if mineE.get(sid) == i)
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        say("   %-7s replayed in %.0f s | today %d | E %d | package A %d | A wicks + maj %d | 30m candles from %s" % (
+            a, time.time() - t_a, len(V.get("TODAY", [])), len(V.get("E", [])), len(V.get("Package A (B13)", [])),
+            0, str(T.t[0])[:10]))
+    if not spans:
+        return
+    T0_, T1_ = min(s[0] for s in spans), max(s[1] for s in spans)
+    say("\n   CHECK 1 -- my close-through entries vs the engine's own: %d of %d engine entries matched exactly (mine: %d)%s" % (
+        e_match, e_eng, e_mine, "" if e_match == e_eng == e_mine else "   <-- MISMATCH: results below don't count -- tell Claude"))
+    say("\n   ALL MARKETS TOGETHER (one position per market at a time; every row priced on the 30m candles):")
+    say("   " + HEAD)
+    tab = {v: stats(r, T0_, T1_) for v, r in allrows.items()}
+    for v in ORDER:
+        say("   " + (line(v, tab[v]) if v in tab else "%-15s (no trades)" % v))
+    say("\n   SHARPNESS (package trades only): average hours from the E signal to the entry, and the price given up vs the E close"
+        " in 1H moves")
+    for v in ORDER[3:]:
+        r = [x for x in allrows.get(v, []) if x.get("delay") is not None]
+        if r:
+            say("   %-20s %5d trades | wait %5.1f h | gave up %+5.2f moves" % (v, len(r), np.mean([x["delay"] for x in r]),
+                                                                         np.mean([x["give"] for x in r])))
+    say("\n   WHAT THE PACKAGE DECIDED (all markets):")
+    for v in ORDER[2:]:
+        c = tally[v]
+        say("   %-20s %s" % (v, " | ".join("%s %d" % (k, n) for k, n in sorted(c.items(), key=lambda kv: -kv[1]))))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   " + a)
+        for v in ["TODAY"] + FOCUS:
+            say("     " + (line(v, per[a][v]) if v in per[a] else "%-15s (no trades)" % v))
+
+
+
+# =====================================================================================================================
+# D2 (Desire 5 Oct): THE LIVERMORE TIMEFRAME TEST -- which timeframe's Livermore reading fits best: 1H, 4H, 1D or 1W.
+# The bot's own Livermore code and each market's own settings, replayed candle by candle on each timeframe.
+# =====================================================================================================================
+UP_STATES = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+LSM_TFS = ("1H", "4H", "1D", "1W")
+
+
+def lsm_signs(a, df, span):
+    """(close times, +1 in an up state / -1 in a down state / 0 unknown) for every closed candle of this timeframe."""
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())             # run from C:\\TradingBot\\TBOT, so the bot's own code can be read
+    from src.execution.livermore_state_machine import LivermoreStateMachine, atr14 as lsm_atr
+    p = (PIV or {}).get(a, {}) or {}
+    lsm = LivermoreStateMachine(asset=a, timeframe="TEST", major_mult=p.get("major_mult", 3.5),
+                                minor_mult=p.get("minor_mult", 1.0), dual_confirm=p.get("dual_confirm", 2),
+                                atr_period=p.get("atr_period", 14))
+    d = df[["high", "low", "close"]].astype(float)
+    atr = lsm_atr(d, int(p.get("atr_period", 14))).values
+    c = d["close"].values
+    sg = np.zeros(len(c))
+    for i in range(len(c)):
+        lsm.update(float(c[i]), float(atr[i]))
+        st = str(lsm.state() if callable(getattr(lsm, "state", None)) else getattr(lsm, "state", ""))
+        sg[i] = 1 if st in UP_STATES else (-1 if st else 0)
+    return (df.index + span).values, sg
+
+
+def lsm_frames(M, a, df1, fr):
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    d1 = fr.get("D1") if fr.get("D1") is not None else df1.resample("1D").agg(agg).dropna()
+    w1 = fr.get("W1") if fr.get("W1") is not None else df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+    return {"1H": (df1, pd.Timedelta(hours=1)), "4H": (M.hourly_to_4h(df1), pd.Timedelta(hours=4)),
+            "1D": (d1, pd.Timedelta(days=1)), "1W": (w1, pd.Timedelta(days=7))}
+
+
+def sign_at(tt, sg, t):
+    k = int(np.searchsorted(tt, np.datetime64(pd.Timestamp(t)), side="right")) - 1
+    return sg[k] if k >= 0 else 0
+
+
+def book_tag(M, A, T, cands, runner, cost, usd):
+    """book30, keeping each trade's own details (entry time, direction, tags)."""
+    out, free = [], -1
+    for c in sorted(cands, key=lambda x: x["k"]):
+        if c["k"] <= free:
+            continue
+        kk, px, risk0 = sim30(M, A, T, c["d"], c["k"], c["q"], c["stop"], c["tgt"], runner)
+        pts = c["d"] * (px - c["q"]) - cost * c["q"]
+        out.append(dict(c, t=T.t[kk], t_in=T.t[c["k"]], money=pts * usd, R=pts / risk0 if risk0 > 0 else 0.0,
+                        inside=False, noise=False))
+        free = kk
+    return out
+
+
+def e_cands(M, a, df1, pcfg, T):
+    pE = json.loads(json.dumps(pcfg or {}, default=str))
+    pE.setdefault("ns_markets", {}).setdefault(a, {})
+    pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+    engE, _e, _a = run_engine(M, a, df1, pE)
+    out = []
+    for p in engE:
+        f = p["fields"]
+        tc = pd.Timestamp(f["ns_candle"])
+        k = int(np.searchsorted(T.tv, np.datetime64(tc)))
+        if k < T.n and T.t[k] == tc and f.get("ns_stop") is not None:
+            out.append(dict(k=k, q=float(f["ns_close"]), stop=float(f["ns_stop"]), tgt=f.get("ns_target"), d=int(f["setup_dir"])))
+    return out
+
+
+def run_lsm_test(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nD2 -- THE LIVERMORE TIMEFRAME TEST: which timeframe's Livermore reading fits best (the bot's own brain code"
+        " and settings, replayed on 1H, 4H, daily and weekly candles)\n" + "=" * 110)
+    dirn = {tf: [0, 0, 0.0] for tf in LSM_TFS}                 # readings, right, sum of signed moves
+    trades = {tf: {1: [], -1: []} for tf in LSM_TFS}           # agree / against -> R list
+    permk = {}
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        sig = {tf: lsm_signs(a, f, sp) for tf, (f, sp) in lsm_frames(M, a, df1, fr).items()}
+        # A. direction: at every 4H close, the state against the next 24 hours of price, in 4H moves
+        d4 = M.hourly_to_4h(df1)
+        t4 = (d4.index + pd.Timedelta(hours=4)).values
+        a4 = M.atr14(d4["high"].values, d4["low"].values, d4["close"].values)
+        t1v, c1 = A["t1"].values, A["cl"]
+        pm = {tf: [0, 0] for tf in LSM_TFS}
+        for i in range(60, len(t4)):
+            j0 = int(np.searchsorted(t1v, t4[i], side="right")) - 1
+            j1 = int(np.searchsorted(t1v, t4[i] + np.timedelta64(24, "h"), side="right")) - 1
+            if j0 < 0 or j1 <= j0 or pd.Timestamp(t1v[j1]) - pd.Timestamp(t4[i]) < pd.Timedelta(hours=20):
+                continue
+            if not (a4[i] == a4[i] and a4[i] > 0):
+                continue
+            mv = (c1[j1] - c1[j0]) / a4[i]
+            for tf in LSM_TFS:
+                s = sign_at(sig[tf][0], sig[tf][1], pd.Timestamp(t4[i]))
+                if s == 0:
+                    continue
+                dirn[tf][0] += 1
+                dirn[tf][1] += int(s * mv > 0)
+                dirn[tf][2] += s * mv
+                pm[tf][0] += 1
+                pm[tf][1] += int(s * mv > 0)
+        # B. trades: every E trade, split by whether each timeframe agreed with it at the entry
+        rows = book_tag(M, A, T, e_cands(M, a, df1, pcfg, T), runner, cost, usd)
+        for r in rows:
+            for tf in LSM_TFS:
+                s = sign_at(sig[tf][0], sig[tf][1], r["t_in"])
+                if s != 0:
+                    trades[tf][1 if s == r["d"] else -1].append(r["R"])
+        permk[a] = (pm, rows, sig)
+        say("   %-7s %d E trades | readings per timeframe: %s" % (a, len(rows), " ".join("%s %d" % (tf, pm[tf][0]) for tf in LSM_TFS)))
+    say("\n   A. DIRECTION -- at every 4H close: did each timeframe's Livermore state point the way price went over the next 24 hours?")
+    say("   timeframe   readings   right   average move WITH the state (4H moves)")
+    for tf in LSM_TFS:
+        n, ok, sm = dirn[tf]
+        say("   %-9s %9d   %4.1f%%   %+8.3f" % (tf, n, 100.0 * ok / n if n else 0.0, sm / n if n else 0.0))
+    say("\n   B. TRADES -- every E trade (the live entry), split by whether each timeframe's state AGREED with the trade at entry")
+    say("   timeframe   agreed: trades  win  R/trade   |   against: trades  win  R/trade   |   difference R/trade")
+    for tf in LSM_TFS:
+        ag, ot = trades[tf][1], trades[tf][-1]
+        f = lambda xs: (len(xs), 100.0 * sum(1 for x in xs if x > 0) / len(xs) if xs else 0.0, sum(xs) / len(xs) if xs else 0.0)
+        g, o = f(ag), f(ot)
+        say("   %-9s %15d %4.0f%% %+8.2f   | %16d %4.0f%% %+8.2f   | %+10.2f" % (tf, g[0], g[1], g[2], o[0], o[1], o[2], g[2] - o[2]))
+    say("\n   EACH MARKET -- direction right% per timeframe (1H / 4H / 1D / 1W), and trades agreeing per timeframe (n, R/trade)")
+    for a, (pm, rows, sig) in permk.items():
+        parts = []
+        for tf in LSM_TFS:
+            ag = [r["R"] for r in rows if sign_at(sig[tf][0], sig[tf][1], r["t_in"]) == r["d"]]
+            parts.append("%s %4.1f%% | %3d %+5.2f" % (tf, 100.0 * pm[tf][1] / pm[tf][0] if pm[tf][0] else 0.0, len(ag),
+                                                   sum(ag) / len(ag) if ag else 0.0))
+        say("   %-7s %s" % (a, "   ".join(parts)))
+    say("\n   READ: the best timeframe points the right way most often (A) AND separates winning from losing trades (B: a big"
+        " positive difference). If no timeframe does both clearly, none should be used globally yet.")
+
+
+# =====================================================================================================================
+# D1 (Desire 1 and 5 Oct): THE DIAGONAL-LINES TEST -- diagonal lines mirror the horizontal lines' rules; a break on a
+# diagonal alone may trade. Lines through two 4H swing closes (two lower highs for a buy line, two higher lows for a
+# sell line), valid once a third point touches (within half a 4H move) -- the same 3-touch rule the package reads.
+# Break: a 4H close past the line by 0.25 of a 4H move (big), or a smaller close past it held by the next 1H close.
+# Retest: a later 4H candle back to the line (within 0.25 of a move) without a close past the origin; a close back
+# through the line needs a later 4H close past it again (the recovery). Entry: the first 1H close past the highest
+# (lowest, for sells) close since the break. Stop and target: the engine's own (behind the line at the retest).
+# =====================================================================================================================
+DIAG_LIFE = 60          # 4H candles a line is watched for a break
+DIAG_WAIT = 30          # 4H candles after the break that a setup may take to retest and trigger
+DIAG_WITH_H = 12        # hours: a diagonal entry within this of a horizontal E entry, same direction, is "with horizontal"
+
+
+def diag_setups(M, a, df1, A, cfg):
+    d4 = M.hourly_to_4h(df1)
+    t4 = (d4.index + pd.Timedelta(hours=4))
+    hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+    a4 = M.atr14(hi4, lo4, c4)
+    n4, KK = len(c4), M.K
+    t1v, c1, atr1 = A["t1"].values, A["cl"], A["atr"]
+    piv = {"H": [], "L": []}
+    for i in range(KK, n4 - KK):
+        w = c4[i - KK:i + KK + 1]
+        if c4[i] == w.max():
+            piv["H"].append(i)
+        if c4[i] == w.min():
+            piv["L"].append(i)
+    out, seen = [], set()
+    for d, typ in ((1, "H"), (-1, "L")):
+        P = piv[typ]
+        for j in range(1, len(P)):
+            i1, i2 = P[j - 1], P[j]
+            v1, v2 = c4[i1], c4[i2]
+            if i2 == i1 or (d == 1 and not v2 < v1) or (d == -1 and not v2 > v1):
+                continue
+            slope = (v2 - v1) / (i2 - i1)
+            L = lambda x: v1 + slope * (x - i1)
+            nxt = P[j + 1] if j + 1 < len(P) else n4      # a newer pivot of the same kind replaces this line
+            start = i2 + KK                                # the second pivot is confirmed here
+            earlier = P[max(0, j - 5):j - 1]
+            valid = any(abs(c4[p] - L(p)) <= 0.5 * a4[p] for p in earlier if a4[p] == a4[p])
+            brk = None
+            for x in range(start, min(n4, start + DIAG_LIFE, nxt + KK)):
+                if not valid and x >= i2 + 3 and a4[x] == a4[x] and abs(c4[x] - L(x)) <= 0.5 * a4[x]:
+                    valid = True
+                    continue
+                if not valid or not (a4[x] == a4[x] and a4[x] > 0):
+                    continue
+                past = d * (c4[x] - L(x))
+                if past >= 0.25 * a4[x]:
+                    brk = x
+                    break
+                if past > 0:
+                    jn = int(np.searchsorted(t1v, t4[x].to_datetime64(), side="right"))   # the next 1H close
+                    if jn < len(c1) and d * (c1[jn] - L(x)) > 0:
+                        brk = x
+                        break
+            if brk is None:
+                continue
+            origin = (c4[i2:brk + 1].min() if d == 1 else c4[i2:brk + 1].max())
+            ret, peak = None, c4[brk]
+            pend = False
+            for y in range(brk + 1, min(n4, brk + 1 + DIAG_WAIT)):
+                if d * (c4[y] - origin) < 0:
+                    break                                   # the setup died
+                peak = max(peak, c4[y]) if d == 1 else min(peak, c4[y])
+                lv = L(y)
+                touch = (lo4[y] <= lv + 0.25 * a4[y]) if d == 1 else (hi4[y] >= lv - 0.25 * a4[y])
+                if pend and d * (c4[y] - lv) >= 0:
+                    ret = y
+                    break
+                if touch:
+                    if d * (c4[y] - lv) >= 0:
+                        ret = y
+                        break
+                    pend = True                              # closed back through the line: needs a recovery close
+            if ret is None:
+                continue
+            peak = (c4[brk:ret + 1].max() if d == 1 else c4[brk:ret + 1].min())
+            r2 = L(ret)
+            tr = t4[ret]
+            j0 = int(np.searchsorted(t1v, tr.to_datetime64(), side="right"))
+            tend = t4[min(n4 - 1, brk + DIAG_WAIT)]
+            for jj in range(j0, len(c1)):
+                if pd.Timestamp(t1v[jj]) > tend:
+                    break
+                k4 = int(np.searchsorted(t4.values, t1v[jj], side="right")) - 1
+                if k4 >= 0 and d * (c4[k4] - origin) < 0:
+                    break
+                if d * (c1[jj] - peak) > 0:
+                    e, at = float(c1[jj]), float(atr1[jj])
+                    if not (at == at and at > 0) or d * (e - r2) / at > M.FRESH_ATR:
+                        break
+                    stop, tgt = M.ns_levels(d, e, r2, at, cfg["min_sl_pct"], cfg["target_atr"])
+                    if stop is None or not M.gate_rr_ok(e, stop, at, cfg["min_rr"]):
+                        break
+                    key = (d, pd.Timestamp(t1v[jj]))
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(dict(d=d, t=pd.Timestamp(t1v[jj]), e=e, stop=float(stop), tgt=tgt))
+                    break
+    return out
+
+
+def run_diag_test(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nD1 -- THE DIAGONAL-LINES TEST: breaks of 3-touch diagonal lines, traded break -> retest -> 1H close-through,"
+        " like the horizontal lines\n" + "=" * 110)
+    names = ["E (horizontal, live)", "DIAG all", "DIAG alone", "DIAG with horizontal", "E + DIAG alone"]
+    allrows, spans = collections.defaultdict(list), []
+    per = {}
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        ec = e_cands(M, a, df1, pcfg, T)
+        e_times = [(c["d"], T.t[c["k"]]) for c in ec]
+        dc = []
+        for s in diag_setups(M, a, df1, A, cfg):
+            k = int(np.searchsorted(T.tv, np.datetime64(s["t"])))
+            if k >= T.n or T.t[k] != s["t"]:
+                continue
+            withh = any(dd == s["d"] and abs((tt - s["t"]).total_seconds()) <= DIAG_WITH_H * 3600 for dd, tt in e_times)
+            dc.append(dict(k=k, q=s["e"], stop=s["stop"], tgt=s["tgt"], d=s["d"], withh=withh))
+        V = {"E (horizontal, live)": ec, "DIAG all": dc, "DIAG alone": [c for c in dc if not c["withh"]],
+             "DIAG with horizontal": [c for c in dc if c["withh"]], "E + DIAG alone": ec + [c for c in dc if not c["withh"]]}
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v in names:
+            rows = book_tag(M, A, T, V[v], runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        say("   %-7s diagonal entries %d (alone %d, with a horizontal E %d) | horizontal E entries %d" % (
+            a, len(dc), sum(1 for c in dc if not c["withh"]), sum(1 for c in dc if c["withh"]), len(ec)))
+    if not spans:
+        say("   no market had 30m candles -- nothing to report")
+        return
+    T0_, T1_ = min(s[0] for s in spans), max(s[1] for s in spans)
+    say("\n   ALL MARKETS TOGETHER (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in names:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   EACH MARKET:")
+    for a, pv in per.items():
+        say("   %s" % a)
+        for v in names:
+            say("     " + line(v[:15], pv[v]))
+    say("\n   READ: 'DIAG alone' is what your 1 Oct ruling adds (a break only on a diagonal line). It should only go live if it"
+        " makes money in both halves and 'E + DIAG alone' beats 'E' without a much bigger drop.")
+
+
+
+# =====================================================================================================================
+# THE SILVER LONG OF 5 OCT 2026, REBUILT: the engine's own proof, its setup, the 4H candles of the break, every line
+# ahead (on 4H closes, as the bot judges, and on wicks, as the eye reads the chart), the bigger-timeframe votes, what
+# package A would have done had the trade been handed over, and the live trade's path to its stop.
+# =====================================================================================================================
+CASE = dict(asset="SILVER", d=1, r2=61.278, day="2026-10-05", fill=61.709, stop=61.152, target=63.39,
+            filled="2026-10-05 10:09")
+
+
+def trade_case(data, frames, pcfg):
+    a, d = CASE["asset"], CASE["d"]
+    say("\n" + "=" * 110 + "\nTHE SILVER LONG OF 5 OCT, REBUILT WITH THE BOT'S OWN CODE AND CANDLES (all times MT5 server time, as the bot's candles)\n" + "=" * 110)
+    if a not in data:
+        say("   %s: no candles -- the trade can't be rebuilt" % a)
+        return
+    M = load_engine("4H/1H", False)
+    df1, fr = data[a], frames.get(a, {})
+    cfg = M.market_settings(a, pcfg)
+    A = arrays(df1, False, M)
+    pE = json.loads(json.dumps(pcfg or {}, default=str))
+    pE.setdefault("ns_markets", {}).setdefault(a, {})
+    pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+    engE, ends, alive = run_engine(M, a, df1, pE)
+    setups = {s["id"]: s for s, _r, _t in ends}
+    for s in alive:
+        setups[s["id"]] = s
+    day0 = pd.Timestamp(CASE["day"])
+    near_day = [p["fields"] for p in engE if day0 - pd.Timedelta(days=3) <= pd.Timestamp(p["fields"]["ns_candle"]) <= day0 + pd.Timedelta(days=1)]
+    hit = [f for f in near_day if int(f["setup_dir"]) == d and abs(float(f["ns_r2"]) - CASE["r2"]) < 0.02]
+    say("   the engine's SILVER proofs of 2-5 Oct: " + (" | ".join("%s dir %+d line %.3f close %.3f" % (
+        f["ns_candle"], int(f["setup_dir"]), float(f["ns_r2"]), float(f["ns_close"])) for f in near_day) or "none"))
+    if not hit:
+        say("   no proof at line %.3f -- the rebuild stops here (tell Claude)" % CASE["r2"])
+        return
+    f = hit[-1]
+    sid = int(f["ns_setup_id"])
+    s = setups.get(sid, {})
+    tE, eE, r2 = pd.Timestamp(f["ns_candle"]), float(f["ns_close"]), float(f["ns_r2"])
+    say("\n   1. THE PROOF: 1H candle %s closed %.3f | the line (R2) %.3f | stop %s | target %s | setup %d" % (
+        tE, eE, r2, f.get("ns_stop"), f.get("ns_target"), sid))
+    say("      the setup as the engine recorded it:")
+    for k in sorted(s):
+        v = s[k]
+        if isinstance(v, (int, float, str, bool, type(None), pd.Timestamp, np.floating, np.integer)):
+            say("        %-16s %s" % (k, v))
+    d4 = M.hourly_to_4h(df1)
+    t4c = d4.index + pd.Timedelta(hours=4)
+    h4, l4, c4, o4 = (d4[x].astype(float).values for x in ("high", "low", "close", "open"))
+    a4 = M.atr14(h4, l4, c4)
+    say("\n   2. THE 4H CANDLES, 28 Sep - 5 Oct (close time): open / high / low / close | close past the line, in 4H moves")
+    for i in range(len(d4)):
+        if day0 - pd.Timedelta(days=7) <= t4c[i] <= day0 + pd.Timedelta(hours=16):
+            say("      %s  %.3f  %.3f  %.3f  %.3f | %+.2f%s" % (t4c[i], o4[i], h4[i], l4[i], c4[i], d * (c4[i] - r2) / a4[i],
+                "   <- the proof's hour is inside this candle" if t4c[i] - pd.Timedelta(hours=4) < tE <= t4c[i] else ""))
+    L = Levels(M, d4)
+    aE = L.atr_at(tE)
+    say("\n   3. LINES AHEAD AT THE PROOF (close %.3f; a 4H move = %.3f, so 'just ahead' = within %.3f, up to %.3f)" % (
+        eE, aE, NEAR * aE, eE + d * NEAR * aE))
+    typ = "H" if d == 1 else "L"
+    for lab, rows in (("on 4H CLOSES (how the bot judges)", [(lv, cf) for cf, ty, lv, _i, _ed in L.sw if ty == typ]),
+                      ("on 4H WICKS (how the eye reads the chart)", [(lv, cf) for cf, ty, lv, _i in L.swh if ty == typ])):
+        rr = sorted({(round(lv, 3), pd.Timestamp(cf)) for lv, cf in rows
+                     if pd.Timestamp(cf) <= tE and pd.Timestamp(cf) >= tE - pd.Timedelta(days=AHEAD_DAYS)
+                     and d * (lv - eE) > -1.5 * aE and d * (lv - eE) < 6 * aE}, key=lambda x: d * x[0])
+        say("      swing lines %s, from -1.5 to +6 4H moves around the proof:" % lab)
+        for lv, cf in rr:
+            dist = d * (lv - eE) / aE
+            say("        %.3f  confirmed %s  %+.2f moves%s" % (lv, cf, dist, "   <- JUST AHEAD" if 0 < dist <= NEAR else
+                                                                  ("   (ahead)" if dist > 0 else "   (already passed)")))
+    lc, _ec, nc = L.ahead_level(d, eE, tE)
+    lw, nw = L.ahead_wick(d, eE, tE)
+    say("      VERDICT on closes (the bot): nearest line ahead %s -> %s" % (
+        ("%.3f, %.2f moves" % (lc, nc)) if lc is not None else "none",
+        "the PACKAGE" if (lc is not None and nc <= NEAR) else "taken at once (space to run)"))
+    say("      VERDICT on wicks:            nearest high ahead %s -> %s" % (
+        ("%.3f, %.2f moves" % (lw, nw)) if lw is not None else "none",
+        "the PACKAGE" if (lw is not None and nw <= NEAR) else "taken at once (space to run)"))
+    F4 = TF(M, d4, 4)
+    D1, W1 = fr.get("D1"), fr.get("W1")
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if D1 is None:
+        D1 = df1.resample("1D").agg(agg).dropna()
+    if W1 is None:
+        W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+    BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+    vw, vd, v4 = BW.read(tE, d), BD.read(tE, d), strong4h(F4, tE, d)
+    nm = (vw == 1) + (vd == 1) + int(bool(v4))
+    word = {1: "WITH the buy", -1: "AGAINST", 0: "mixed"}
+    say("\n   4. BIGGER TIMEFRAMES AT THE PROOF (the package's 2-of-3 check): weekly %s | daily %s | 4H %s -> %d of 3%s" % (
+        word.get(vw, vw), word.get(vd, vd), "strong WITH" if v4 else "not strong", nm,
+        "" if nm >= 2 else "  -> the package would have said NO MAJORITY (no trade)"))
+    if fr.get("M30") is not None and len(fr["M30"]) > 100:
+        T = Thirty(fr["M30"])
+        trg = float(s.get("h2_frozen", s.get("h2", eE)))
+        r1 = float(s.get("r1", r2))
+        say("\n   5. IF IT HAD BEEN HANDED TO PACKAGE A (trigger %.3f):" % trg)
+        for lab, lv in (("closes", lc if (lc is not None and nc <= NEAR) else None),
+                        ("wicks", lw if (lw is not None and nw <= NEAR) else None)):
+            if lv is None:
+                say("      on %s: not handed over (no line just ahead)" % lab)
+                continue
+            if nm < 2:
+                say("      on %s: line %.3f -- stopped at the majority check (no trade)" % (lab, lv))
+                continue
+            level = max(trg, lv) if d == 1 else min(trg, lv)
+            out, k, how = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+            say("      on %s: must close past %.3f -> %s%s" % (lab, level, out.upper(),
+                (" at %s, price %.3f" % (T.t[k], T.c[k])) if out == "enter" and k is not None else ""))
+        tf = pd.Timestamp(CASE["filled"])
+        k0 = int(np.searchsorted(T.tv, np.datetime64(tf)))
+        hi_max, hit_t = -1e18, None
+        for k in range(k0, min(T.n, k0 + 200)):
+            hi_max = max(hi_max, float(T.h[k])) if d == 1 else hi_max
+            if (d == 1 and T.l[k] <= CASE["stop"]) or (d == -1 and T.h[k] >= CASE["stop"]):
+                hit_t = T.t[k]
+                break
+        say("\n   6. THE LIVE TRADE (filled %.3f at %s): highest price before the stop %.3f | stop %.3f hit in the 30m candle of %s"
+            % (CASE["fill"], CASE["filled"], hi_max, CASE["stop"], hit_t))
+        say("      30m candles from 2 hours before the fill to the stop (time / open / high / low / close):")
+        for k in range(max(k0 - 4, 0), min(T.n, k0 + 12)):
+            say("        %s  %.3f  %.3f  %.3f  %.3f" % (T.t[k], T.o[k] if hasattr(T, "o") else float("nan"), T.h[k], T.l[k], T.c[k]))
+            if hit_t is not None and T.t[k] >= hit_t:
+                break
+    else:
+        say("   no 30m candles -- parts 5 and 6 skipped")
+
+
+
+# =====================================================================================================================
+# CLOSE-THROUGH QUALITY (Desire 5 Oct, after the SILVER long): judge the quality of the close-through (and the retest)
+# instead of adding vetoes. Each variant changes WHEN the E signal fires; everything after it is the live system after
+# B13: a signal with a bigger 4H line (on closes) within half a move ahead, or too far, goes to package A (2-of-3
+# majority, strict 1H + two 30m closes past the trigger and the line, 24 h); the rest are taken at once with the engine's
+# own stop, target and gates. Every variant runs through the same code, so the rows compare like with like.
+#   E       today: the first 1H close past the peak
+#   MARGIN  ...by at least 0.15 of a 4H move (Desire's 14 Sep proof tolerance)
+#   STRONG  ...and the close-through candle closes the trade's way, in the top third of its range
+#   HOLD    ...and the next 1H close also holds past the peak (entry on that second close)
+#   M+S     MARGIN and STRONG together
+#   REAL RT the retest must come back to the line itself (within the touch allowance of R2), not just to the wick edge
+#           of the line's swing; the peak keeps rising until that real retest; then E
+#   RT+S    REAL RT, then STRONG
+# =====================================================================================================================
+CT_VARIANTS = ["E", "MARGIN", "STRONG", "HOLD", "M+S", "REAL RT", "RT+S"]
+CT_MARGIN = 0.15
+
+
+def ct_trigger(M, s, A, v, a4_at):
+    """The 1H index of the entry for variant v, the peak it had to beat, and the retest index (or None)."""
+    tt = s.get("t_touch")
+    it = A["pos"].get(pd.Timestamp(tt)) if tt is not None else None
+    if it is None:
+        return None
+    d, r1, r2 = s["d"], s["r1"], s["r2"]
+    h2 = float(s.get("h2_frozen", s.get("h2")))
+    op, hi, lo, cl, t1, n, atr = A["op"], A["hi"], A["lo"], A["cl"], A["t1"], A["n"], A["atr"]
+    real = v in ("REAL RT", "RT+S")
+    start = it
+    if real:
+        ir = None
+        for i in range(it, n):
+            if i > it and (A["kill"](i) and ((d == 1 and cl[i] < r1) or (d == -1 and cl[i] > r1))):
+                return None
+            if t1[i] - pd.Timestamp(tt) > M.WAIT_TRIGGER:
+                return None
+            if (d == 1 and lo[i] <= r2 + M.TOUCH_ATR * atr[i]) or (d == -1 and hi[i] >= r2 - M.TOUCH_ATR * atr[i]):
+                ir = i
+                break
+            if i > it and d * (cl[i] - h2) > 0:
+                h2 = float(cl[i])               # the peak keeps rising until the real retest
+        if ir is None:
+            return None
+        start = ir
+    for i in range(start + 1, n):
+        if A["kill"](i) and ((d == 1 and cl[i] < r1) or (d == -1 and cl[i] > r1)):
+            return None
+        if t1[i] - pd.Timestamp(tt) > M.WAIT_TRIGGER:
+            return None
+        c = cl[i]
+        if d * (c - h2) <= 0:
+            continue
+        if v in ("MARGIN", "M+S"):
+            a4 = a4_at(t1[i])
+            if not (a4 == a4 and a4 > 0) or d * (c - h2) < CT_MARGIN * a4:
+                continue
+        if v in ("STRONG", "M+S", "RT+S"):
+            rng = hi[i] - lo[i]
+            if rng <= 0 or d * (c - op[i]) <= 0:
+                continue
+            pos = (c - lo[i]) / rng if d == 1 else (hi[i] - c) / rng
+            if pos < 2.0 / 3.0:
+                continue
+        if v == "HOLD":
+            if i + 1 >= n or d * (cl[i + 1] - h2) <= 0:
+                continue
+            return i + 1, h2, start
+        return i, h2, start
+    return None
+
+
+def run_ct(data, frames, pcfg, costs, lots, case_r2=61.278):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nCLOSE-THROUGH QUALITY -- the live system after B13, with the E signal judged more strictly in each row\n" + "=" * 110)
+    allrows = {v: [] for v in CT_VARIANTS}
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in CT_VARIANTS}
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        t1v = A["t1"].values
+        V = {v: [] for v in CT_VARIANTS}
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            is_case = (a == "SILVER" and d == 1 and abs(r2 - case_r2) < 0.02 and
+                       pd.Timestamp("2026-10-04") <= pd.Timestamp(tt) <= pd.Timestamp("2026-10-06"))
+            for v in CT_VARIANTS:
+                got = ct_trigger(M, s, A, v, L.atr_at)
+                if got is None:
+                    tally[v]["no close-through"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-8s no close-through -> NO TRADE" % v)
+                    continue
+                iE, trg, istart = got
+                if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                    tally[v]["spike candle"] += 1
+                    continue
+                tally[v]["signals"] += 1
+                tE, eE = A["t1"][iE], float(A["cl"][iE])
+                atr = atr41(M, A, iE)
+                if not (atr == atr and atr > 0):
+                    continue
+                lvl, _ed, near = L.ahead_level(d, eE, tE)
+                is_near = lvl is not None and near is not None and near <= NEAR
+                far = d * (eE - r2) / atr > M.FRESH_ATR
+                if not is_near and not far:
+                    struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                    stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                    strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                    if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                        tally[v]["refused by the engine's gates"] += 1
+                        continue
+                    k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                    if k >= T.n or T.t[k] != tE:
+                        continue
+                    V[v].append(dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d))
+                    tally[v]["taken at once (space to run)"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-8s close-through %s at %.3f (peak %.3f) -> taken at once, stop %.3f" % (
+                            v, tE, eE, trg, stop))
+                    continue
+                level = (max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg
+                nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                if nmaj < 2:
+                    tally[v]["package: no bigger-timeframe majority"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-8s close-through %s at %.3f -> package: no majority -> NO TRADE" % (v, tE, eE))
+                    continue
+                out, k, how = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+                if out != "enter":
+                    tally[v]["package: " + out] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-8s close-through %s -> package: %s -> NO TRADE" % (v, tE, out))
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr2 = atr41(M, A, j1)
+                if not (atr2 == atr2 and atr2 > 0):
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+                if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                    tally[v]["package: stop / reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+                V[v].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d))
+                tally[v]["package: entered"] += 1
+                if is_case:
+                    say("   SILVER 5 Oct, %-8s close-through %s -> package entered %s at %.3f" % (v, tE, tau, q))
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        say("   %-7s %s" % (a, " | ".join("%s %d" % (v, len(V[v])) for v in CT_VARIANTS)))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   ALL MARKETS TOGETHER (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in CT_VARIANTS:
+        say("   " + line(v, stats(allrows[v], T0_, T1_)))
+    say("\n   WHAT HAPPENED (all markets):")
+    for v in CT_VARIANTS:
+        say("   %-8s %s" % (v, " | ".join("%s %d" % (k, n) for k, n in tally[v].most_common())))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   %s" % a)
+        for v in CT_VARIANTS:
+            say("     " + line(v, per[a][v]))
+    say("\n   E here should sit close to the 'Package A (B13)' row above (same system, rebuilt in one place). MARGIN = 0.15 of a"
+        " 4H move | STRONG = closes the trade's way, top third of its range | HOLD = the next 1H close holds too | REAL RT ="
+        " the retest reaches the line itself")
+
+
+
+# =====================================================================================================================
+# THE LIVERMORE BRAIN AS BREAKOUT CONFIRMATION (Desire 5 Oct): the 4H brain splits the chart into six segments (its
+# states). A real breakout should move it into another segment, toward the trade; a weak one leaves it where it was.
+# Two readings, each used two ways, all on the live system after B13 (package A, lines on closes, today's E):
+#   WITH   the brain sits in the trade's family at the close-through (buy: MAIN_UP, NATURAL_RETRACEMENT,
+#          SECONDARY_RETRACEMENT; sell: the mirror)
+#   MOVED  the brain moved at least one segment toward the trade between the last 4H close before the break and the
+#          close-through. Segment order for a buy: MAIN_DOWN < NATURAL_REBOUND < SECONDARY_REBOUND <
+#          SECONDARY_RETRACEMENT < NATURAL_RETRACEMENT < MAIN_UP (mirror for a sell)
+#   soft   not confirmed -> handed to package A to prove itself (your ruling 5: the brain never kills a proof)
+#   hard   not confirmed -> no trade (for comparison only)
+# The bot's own Livermore code and each market's own brain settings, fed every closed 4H candle.
+# =====================================================================================================================
+BR_ORD = {"MAIN_DOWN": 0, "NATURAL_REBOUND": 1, "SECONDARY_REBOUND": 2, "SECONDARY_RETRACEMENT": 3,
+          "NATURAL_RETRACEMENT": 4, "MAIN_UP": 5}
+BR_ROWS = [("Package A now", None, None), ("WITH soft", "WITH", "soft"), ("MOVED soft", "MOVED", "soft"),
+           ("WITH hard", "WITH", "hard"), ("MOVED hard", "MOVED", "hard")]
+
+
+def lsm_states(a, df, span):
+    """(close times, state names) of the bot's own Livermore brain for every closed candle of this timeframe."""
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
+    from src.execution.livermore_state_machine import LivermoreStateMachine, atr14 as lsm_atr
+    p = (PIV or {}).get(a, {}) or {}
+    lsm = LivermoreStateMachine(asset=a, timeframe="TEST", major_mult=p.get("major_mult", 3.5),
+                                minor_mult=p.get("minor_mult", 1.0), dual_confirm=p.get("dual_confirm", 2),
+                                atr_period=p.get("atr_period", 14))
+    d = df[["high", "low", "close"]].astype(float)
+    atr = lsm_atr(d, int(p.get("atr_period", 14))).values
+    c = d["close"].values
+    out = []
+    for i in range(len(c)):
+        lsm.update(float(c[i]), float(atr[i]))
+        out.append(str(lsm.state() if callable(getattr(lsm, "state", None)) else getattr(lsm, "state", "")))
+    return (df.index + span).values, out
+
+
+def run_brain(data, frames, pcfg, costs, lots, case_r2=61.278):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nTHE LIVERMORE BRAIN AS BREAKOUT CONFIRMATION -- the live system after B13, routed by the 4H brain in each row\n" + "=" * 110)
+    names = [r[0] for r in BR_ROWS]
+    allrows = {v: [] for v in names}
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in names}
+    conf = collections.Counter()
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        try:
+            bt, bs = lsm_states(a, d4, pd.Timedelta(hours=4))
+        except Exception as ex:
+            say("   %-7s the brain could not be run: %s -- market skipped" % (a, ex))
+            continue
+        t1v = A["t1"].values
+
+        def brain_at(t):
+            k = int(np.searchsorted(bt, np.datetime64(pd.Timestamp(t)), side="right")) - 1
+            return bs[k] if k >= 0 else ""
+        V = {v: [] for v in names}
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            atr = atr41(M, A, iE)
+            if not (atr == atr and atr > 0):
+                continue
+            st_now = brain_at(tE)
+            tb = s.get("b_t") or s.get("t_break")
+            st_before = brain_at(pd.Timestamp(tb) - pd.Timedelta(hours=4)) if tb is not None else ""
+            o_now = BR_ORD.get(st_now)
+            o_bef = BR_ORD.get(st_before)
+            if o_now is not None and d == -1:
+                o_now = 5 - o_now
+            if o_bef is not None and d == -1:
+                o_bef = 5 - o_bef
+            ok = {"WITH": o_now is not None and o_now >= 3,
+                  "MOVED": o_now is not None and o_bef is not None and o_now > o_bef}
+            conf["signals"] += 1
+            conf["brain WITH the trade at the close-through"] += ok["WITH"]
+            conf["brain MOVED toward the trade since the break"] += ok["MOVED"]
+            is_case = (a == "SILVER" and d == 1 and abs(r2 - case_r2) < 0.02 and
+                       pd.Timestamp("2026-10-04") <= pd.Timestamp(tt) <= pd.Timestamp("2026-10-06"))
+            if is_case:
+                say("   SILVER 5 Oct: the brain before the break %s -> at the close-through %s | WITH %s | MOVED %s" % (
+                    st_before or "?", st_now or "?", "yes" if ok["WITH"] else "no", "yes" if ok["MOVED"] else "no"))
+            lvl, _ed, near = L.ahead_level(d, eE, tE)
+            is_near = lvl is not None and near is not None and near <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            nmaj = None
+            for name, rule, how in BR_ROWS:
+                if rule is not None and not ok[rule] and how == "hard":
+                    tally[name]["not confirmed by the brain -- no trade"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-14s -> NO TRADE" % name)
+                    continue
+                to_pkg = is_near or far or (rule is not None and not ok[rule] and how == "soft")
+                if not to_pkg:
+                    struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                    stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                    strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                    if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                        tally[name]["refused by the engine's gates"] += 1
+                        continue
+                    k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                    if k >= T.n or T.t[k] != tE:
+                        continue
+                    V[name].append(dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d))
+                    tally[name]["taken at once"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-14s -> taken at once at %.3f" % (name, eE))
+                    continue
+                if rule is not None and not ok[rule] and not is_near and not far:
+                    tally[name]["sent to the package by the brain"] += 1
+                level = (max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg
+                if nmaj is None:
+                    nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                if nmaj < 2:
+                    tally[name]["package: no bigger-timeframe majority"] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-14s -> package: no majority -> NO TRADE" % name)
+                    continue
+                out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+                if out != "enter":
+                    tally[name]["package: " + out] += 1
+                    if is_case:
+                        say("   SILVER 5 Oct, %-14s -> package: %s -> NO TRADE" % (name, out))
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr2 = atr41(M, A, j1)
+                if not (atr2 == atr2 and atr2 > 0):
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+                if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                    tally[name]["package: stop / reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+                V[name].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d))
+                tally[name]["package: entered"] += 1
+                if is_case:
+                    say("   SILVER 5 Oct, %-14s -> package entered %s at %.3f" % (name, tau, q))
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        say("   %-7s %s" % (a, " | ".join("%s %d" % (v, len(V[v])) for v in names)))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   HOW OFTEN THE BRAIN CONFIRMED (all markets): " + " | ".join("%s %d" % (k, n) for k, n in conf.items()))
+    say("\n   ALL MARKETS TOGETHER (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in names:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   WHAT HAPPENED (all markets):")
+    for v in names:
+        say("   %-14s %s" % (v, " | ".join("%s %d" % (k, n) for k, n in tally[v].most_common())))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   %s" % a)
+        for v in names:
+            say("     " + line(v[:15], per[a][v]))
+    say("\n   'Package A now' here should equal the 'Package A (B13)' row above (same system, rebuilt in one place).")
+
+
+
+# =====================================================================================================================
+# ZONES, LINES AND DIAGONALS (Desire 5 Oct). Part 1: the Livermore brain's lines (both brains: the main up-leg high,
+# the main down-leg low, the natural high and the natural low) -- when a 4H close crosses one, how often does price go
+# on 2 more 4H moves before closing back across it, against ordinary 4H swing lines? Part 2: our trades by the zone
+# they were taken in. Part 3: the live system after B13 with idea 1 (a diagonal broke the same way in the 24 h before
+# the signal -> taken at once even with a line just ahead), idea 2 (an unbroken 3-touch diagonal within half a move
+# ahead -> the package must clear it), both, and the same two ideas with the brain's lines in place of diagonals.
+# =====================================================================================================================
+ZN_KEYS = (("up", "MAIN UP max"), ("down", "MAIN DOWN min"), ("nhigh", "natural high"), ("nlow", "natural low"))
+ZN_FWD, ZN_GO = 30, 2.0
+ZN_ROWS = ["Package A now", "1 diag fast lane", "2 diag ceiling", "1+2 diagonals", "brain line ahead", "brain cross fast"]
+
+
+def brain_lines(a, df, tf):
+    """The bot's own Livermore brain on this timeframe: close times, states and the four lines after every candle."""
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
+    from src.execution.livermore_state_machine import make_livermore_pair, atr14 as lsm_atr
+    m4, m1 = make_livermore_pair(a, (PIV or {}).get(a, {}) or {})
+    m = m4 if tf == "4H" else m1
+    d = df[["high", "low", "close"]].astype(float)
+    atr = lsm_atr(d, int(((PIV or {}).get(a, {}) or {}).get("atr_period", 14))).values
+    c = d["close"].values
+    out = {k: np.full(len(c), np.nan) for k, _ in ZN_KEYS}
+    st = []
+    for i in range(len(c)):
+        try:
+            s_ = m.update(float(c[i]), float(atr[i]))
+        except Exception:
+            st.append("")
+            continue
+        st.append(str(s_.state))
+        for k, v in (("up", s_.anchor_main_up_max), ("down", s_.anchor_main_down_min),
+                     ("nhigh", s_.anchor_natural_high), ("nlow", s_.anchor_natural_low)):
+            if v is not None and v == v:
+                out[k][i] = float(v)
+    return (df.index + (pd.Timedelta(hours=4) if tf == "4H" else pd.Timedelta(hours=1))).values, st, out
+
+
+def diag_lines(M, d4):
+    """Every 3-touch diagonal (the D1 finder): falling lines through swing-high closes (ceilings for a buy, d=1) and
+    rising lines through swing-low closes (floors for a sell, d=-1), with the 4H candle it became valid and broke."""
+    hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+    a4 = M.atr14(hi4, lo4, c4)
+    n4, KK = len(c4), M.K
+    piv = {"H": [], "L": []}
+    for i in range(KK, n4 - KK):
+        w = c4[i - KK:i + KK + 1]
+        if c4[i] == w.max():
+            piv["H"].append(i)
+        if c4[i] == w.min():
+            piv["L"].append(i)
+    out = []
+    for d, typ in ((1, "H"), (-1, "L")):
+        P = piv[typ]
+        for j in range(1, len(P)):
+            i1, i2 = P[j - 1], P[j]
+            v1, v2 = c4[i1], c4[i2]
+            if (d == 1 and not v2 < v1) or (d == -1 and not v2 > v1):
+                continue
+            slope = (v2 - v1) / (i2 - i1)
+            nxt = P[j + 1] if j + 1 < len(P) else n4
+            start = i2 + KK
+            end = min(n4, start + DIAG_LIFE, nxt + KK)
+            earlier = P[max(0, j - 5):j - 1]
+            vf = start if any(abs(c4[p] - (v1 + slope * (p - i1))) <= 0.5 * a4[p] for p in earlier if a4[p] == a4[p]) else None
+            brk = None
+            for x in range(start, end):
+                lv = v1 + slope * (x - i1)
+                if vf is None:
+                    if x >= i2 + 3 and a4[x] == a4[x] and abs(c4[x] - lv) <= 0.5 * a4[x]:
+                        vf = x + 1
+                    continue
+                if x < vf or not (a4[x] == a4[x] and a4[x] > 0):
+                    continue
+                if d * (c4[x] - lv) >= 0.25 * a4[x]:
+                    brk = x
+                    break
+            if vf is not None:
+                out.append(dict(d=d, i1=i1, v1=v1, slope=slope, vf=vf, brk=brk, end=end))
+    return out
+
+
+def run_zones(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nZONES, LINES AND DIAGONALS -- the brain's lines as gates, our trades by zone, and the two diagonal ideas\n" + "=" * 110)
+    cross = collections.Counter()
+    allrows = {v: [] for v in ZN_ROWS}
+    zone_rows = collections.defaultdict(list)
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in ZN_ROWS}
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        t4c = (d4.index + pd.Timedelta(hours=4)).values
+        hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+        a4 = M.atr14(hi4, lo4, c4)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        try:
+            b4t, _b4s, b4 = brain_lines(a, d4, "4H")
+            b1t, _b1s, b1 = brain_lines(a, df1, "1H")
+        except Exception as ex:
+            say("   %-7s the brain could not be run: %s -- market skipped" % (a, ex))
+            continue
+        DL = diag_lines(M, d4)
+        dbreaks = [(x["d"], pd.Timestamp(t4c[x["brk"]])) for x in DL if x["brk"] is not None]
+        t1v = A["t1"].values
+        # ---- part 1: crossings of the brain's lines vs ordinary 4H swing lines --------------------------------
+        for x in range(1, len(c4)):
+            if not (a4[x] == a4[x] and a4[x] > 0):
+                continue
+            k1 = int(np.searchsorted(b1t, t4c[x - 1], side="right")) - 1
+            lines = [("4H " + nm, b4[k][x - 1]) for k, nm in ZN_KEYS] + \
+                    ([("1H " + nm, b1[k][k1]) for k, nm in ZN_KEYS] if k1 >= 0 else [])
+            top = int(np.searchsorted(L.conf, t4c[x - 1], side="right"))
+            t0 = t4c[x - 1] - np.timedelta64(AHEAD_DAYS, "D")
+            for y in range(top - 1, -1, -1):
+                cf, ty, lv, _i, _ed = L.sw[y]
+                if cf < t0:
+                    break
+                lines.append(("ordinary 4H swing line", lv))
+            for nm, v in lines:
+                if not (v == v):
+                    continue
+                d = 1 if c4[x - 1] <= v < c4[x] else (-1 if c4[x - 1] >= v > c4[x] else 0)
+                if d == 0:
+                    continue
+                res = "neither"
+                for y in range(x + 1, min(len(c4), x + 1 + ZN_FWD)):
+                    if d * (c4[y] - v) < 0:
+                        res = "back"
+                        break
+                    if d * ((hi4[y] if d == 1 else lo4[y]) - v) >= ZN_GO * a4[x]:
+                        res = "on"
+                        break
+                cross[(nm, "up" if d == 1 else "down", res)] += 1
+        # ---- parts 2 and 3: the live system with the diagonal and brain-line ideas --------------------------
+        V = {v: [] for v in ZN_ROWS}
+
+        def diag_ahead(d, e, kx):
+            best = None
+            for ln in DL:
+                if ln["d"] != d or ln["vf"] > kx or kx >= ln["end"] or (ln["brk"] is not None and ln["brk"] <= kx):
+                    continue
+                lv = ln["v1"] + ln["slope"] * (kx - ln["i1"])
+                if d * (lv - e) > 0 and (best is None or d * (lv - e) < d * (best - e)):
+                    best = lv
+            return best
+
+        def brain_now(t):
+            kx4 = int(np.searchsorted(b4t, np.datetime64(pd.Timestamp(t)), side="right")) - 1
+            kx1 = int(np.searchsorted(b1t, np.datetime64(pd.Timestamp(t)), side="right")) - 1
+            return ({nm: b4[k][kx4] for k, nm in ZN_KEYS} if kx4 >= 0 else {},
+                    {nm: b1[k][kx1] for k, nm in ZN_KEYS} if kx1 >= 0 else {})
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            atr = atr41(M, A, iE)
+            aE = L.atr_at(tE)
+            if not (atr == atr and atr > 0 and aE == aE and aE > 0):
+                continue
+            kx = int(np.searchsorted(t4c, np.datetime64(tE), side="right")) - 1
+            lvl, _ed, near = L.ahead_level(d, eE, tE)
+            is_near = lvl is not None and near is not None and near <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            dbr = any(dd == d and tE - pd.Timedelta(hours=24) <= tb <= tE for dd, tb in dbreaks)
+            dah = diag_ahead(d, eE, kx)
+            dnear = dah is not None and d * (dah - eE) <= NEAR * aE
+            bl4, bl1 = brain_now(tE)
+            blines = [v for v in list(bl4.values()) + list(bl1.values()) if v == v]
+            bahead = [v for v in blines if 0 < d * (v - eE) <= NEAR * aE]
+            tb = s.get("b_t") or s.get("t_break")
+            bcross = False
+            if tb is not None:
+                pb, _ = brain_now(pd.Timestamp(tb) - pd.Timedelta(hours=4))
+                kb = int(np.searchsorted(t4c, np.datetime64(pd.Timestamp(tb)), side="right")) - 1
+                if kb >= 1:
+                    bcross = any(v == v and d * (c4[kb - 1] - v) <= 0 < d * (c4[kb] - v) for v in pb.values())
+            # the zone for part 2: the highest 4H brain line the entry is past (buy: above; sell: below)
+            past = [(nm, v) for nm, v in bl4.items() if v == v and d * (eE - v) > 0]
+            zone = (max(past, key=lambda x: d * x[1])[0] if past else "none") + (", line just ahead" if any(
+                0 < d * (v - eE) <= NEAR * aE for v in bl4.values() if v == v) else "")
+            info = tally["Package A now"]
+            info["(info) signals"] += 1
+            info["(info) a diagonal broke the same way in the 24 h before"] += dbr
+            info["(info) an unbroken diagonal within half a move ahead"] += dnear
+            info["(info) a brain line within half a move ahead"] += bool(bahead)
+            info["(info) the break crossed a 4H brain line"] += bcross
+            for name in ZN_ROWS:
+                nr, lev = is_near, ((max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg)
+                if name in ("2 diag ceiling", "1+2 diagonals") and dnear and not is_near:
+                    nr, lev = True, (max(trg, dah) if d == 1 else min(trg, dah))
+                if name == "brain line ahead" and bahead and not is_near:
+                    bl = min(bahead, key=lambda v: d * (v - eE))
+                    nr, lev = True, (max(trg, bl) if d == 1 else min(trg, bl))
+                fast = (name in ("1 diag fast lane", "1+2 diagonals") and dbr) or (name == "brain cross fast" and bcross)
+                if not far and (not nr or fast):
+                    struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                    stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                    strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                    if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                        tally[name]["refused by the engine's gates"] += 1
+                        continue
+                    k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                    if k >= T.n or T.t[k] != tE:
+                        continue
+                    c = dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d)
+                    V[name].append(c)
+                    tally[name]["taken at once" + (" (fast lane)" if (fast and nr) else "")] += 1
+                    if name == "Package A now":
+                        zone_rows[zone].append((a, c))
+                    continue
+                nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                if nmaj < 2:
+                    tally[name]["package: no bigger-timeframe majority"] += 1
+                    continue
+                out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, lev, "A", 24, False)
+                if out != "enter":
+                    tally[name]["package: " + out] += 1
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr2 = atr41(M, A, j1)
+                if not (atr2 == atr2 and atr2 > 0):
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+                if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                    tally[name]["package: stop / reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+                c = dict(k=k, q=q, stop=stop, tgt=tgt, d=d)
+                V[name].append(c)
+                tally[name]["package: entered"] += 1
+                if name == "Package A now":
+                    zone_rows[zone + " (package)"].append((a, c))
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        for z in list(zone_rows):
+            mine = [c for aa, c in zone_rows[z] if aa == a]
+            if mine:
+                zone_rows[z] = [x for x in zone_rows[z] if x[0] != a] + [("_done", r) for r in book30(M, A, T, mine, runner, cost, usd)]
+        say("   %-7s %s" % (a, " | ".join("%s %d" % (v, len(V[v])) for v in ZN_ROWS)))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   PART 1 -- WHEN A 4H CLOSE CROSSES A LINE: 'went on' = price reached 2 more 4H moves past it before a 4H close back"
+        " across it (within %d 4H candles); 'back' = closed back across first" % ZN_FWD)
+    say("   %-34s %-5s %8s %9s %8s %9s" % ("line", "way", "crosses", "went on", "back", "neither"))
+    for nm in sorted({k[0] for k in cross}, key=lambda x: (x.startswith("ordinary"), x)):
+        for way in ("up", "down"):
+            n_on, n_back, n_nei = cross[(nm, way, "on")], cross[(nm, way, "back")], cross[(nm, way, "neither")]
+            n = n_on + n_back + n_nei
+            if n:
+                say("   %-34s %-5s %8d %8.0f%% %7.0f%% %8.0f%%" % (nm, way, n, 100.0 * n_on / n, 100.0 * n_back / n, 100.0 * n_nei / n))
+    say("\n   PART 2 -- OUR TRADES (package A now) BY ZONE: the highest 4H brain line the entry had passed, and whether another"
+        " sat within half a move ahead")
+    say("   " + HEAD)
+    for z in sorted(zone_rows):
+        rows = [r for aa, r in zone_rows[z] if aa == "_done"]
+        if rows:
+            say("   " + line(z[:15], stats(rows, T0_, T1_)) + "   <- " + z)
+    say("\n   PART 3 -- THE LIVE SYSTEM AFTER B13 WITH EACH IDEA (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in ZN_ROWS:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   WHAT HAPPENED (all markets):")
+    for v in ZN_ROWS:
+        say("   %-17s %s" % (v, " | ".join("%s %d" % (k, n) for k, n in tally[v].most_common())))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   %s" % a)
+        for v in ZN_ROWS:
+            say("     " + line(v[:15], per[a][v]))
+    say("\n   'Package A now' should equal the 'Package A (B13)' row above. Ideas: 1 = a 3-touch diagonal broke the same way in the"
+        " 24 h before the signal -> taken at once even with a line just ahead | 2 = an unbroken 3-touch diagonal within half a"
+        " move ahead -> the package must clear it | brain line ahead = a 4H or 1H brain line within half a move ahead -> the"
+        " package must clear it | brain cross fast = the break's 4H close crossed a 4H brain line -> taken at once")
+
+
+
+# =====================================================================================================================
+# MOVING AVERAGES AS DIAGONAL LINES (Desire 5 Oct): the fast lane (B13 item 32) with a moving average in place of the
+# 3-touch diagonal. A break of an MA = a 4H close at least 0.25 of a 4H move past it, the previous 4H close not; the
+# daily MAs are read at their last finished daily close. If the MA broke the same way in the 24 h before a horizontal
+# E signal that has an old high just ahead, the signal is taken at once instead of waiting in the package -- exactly as
+# the diagonal fast lane. Everything else is the live system after B13 (package A, lines on closes).
+# =====================================================================================================================
+MA_LINES = (("4H 50 EMA", "4H", 50), ("4H 200 EMA", "4H", 200), ("1D 50 EMA", "1D", 50), ("1D 200 EMA", "1D", 200))
+MA_ROWS = ["Package A now", "diagonal lane"] + ["%s lane" % m[0] for m in MA_LINES] + ["any MA lane"]
+
+
+def run_ma(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nMOVING AVERAGES AS DIAGONAL LINES -- the fast lane with the 4H and daily 50/200 EMAs in place of the diagonal\n" + "=" * 110)
+    allrows = {v: [] for v in MA_ROWS}
+    lane_rows = {v: [] for v in MA_ROWS}
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in MA_ROWS}
+    info = collections.Counter()
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        t4c = (d4.index + pd.Timedelta(hours=4)).values
+        hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+        a4 = M.atr14(hi4, lo4, c4)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        DL = diag_lines(M, d4)
+        breaks = {"diagonal": [(x["d"], pd.Timestamp(t4c[x["brk"]])) for x in DL if x["brk"] is not None]}
+        dend = (D1.index + pd.Timedelta(days=1)).values
+        dcl = D1["close"].astype(float)
+        for nm, tf, span in MA_LINES:
+            if tf == "4H":
+                ema = pd.Series(c4).ewm(span=span, adjust=False).mean().values
+                ok = np.arange(len(c4)) >= span
+            else:
+                ed = dcl.ewm(span=span, adjust=False).mean().values
+                kd = np.searchsorted(dend, t4c, side="right") - 1
+                ema = np.where(kd >= 0, ed[np.clip(kd, 0, None)], np.nan)
+                ok = kd >= span
+            ev = []
+            for x in range(1, len(c4)):
+                if not (ok[x] and ok[x - 1] and a4[x] == a4[x] and a4[x] > 0 and a4[x - 1] == a4[x - 1]):
+                    continue
+                for d in (1, -1):
+                    if d * (c4[x] - ema[x]) >= 0.25 * a4[x] and d * (c4[x - 1] - ema[x - 1]) < 0.25 * a4[x - 1]:
+                        ev.append((d, pd.Timestamp(t4c[x])))
+            breaks[nm] = ev
+        t1v = A["t1"].values
+        V = {v: [] for v in MA_ROWS}
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            atr = atr41(M, A, iE)
+            if not (atr == atr and atr > 0):
+                continue
+            lvl, _ed, near = L.ahead_level(d, eE, tE)
+            is_near = lvl is not None and near is not None and near <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            hit = {nm: any(dd == d and tE - pd.Timedelta(hours=24) <= tb <= tE for dd, tb in ev) for nm, ev in breaks.items()}
+            hit["any MA"] = any(hit[m[0]] for m in MA_LINES)
+            info["signals"] += 1
+            for nm in ["diagonal"] + [m[0] for m in MA_LINES] + ["any MA"]:
+                info["%s broke the same way in the 24 h before" % nm] += hit[nm]
+            nmaj = None
+            for name in MA_ROWS:
+                key = None if name == "Package A now" else ("diagonal" if name == "diagonal lane" else name[:-5])
+                fast = key is not None and hit[key]
+                if not far and (not is_near or fast):
+                    struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                    stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                    strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                    if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                        tally[name]["refused by the engine's gates"] += 1
+                        continue
+                    k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                    if k >= T.n or T.t[k] != tE:
+                        continue
+                    c = dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d)
+                    V[name].append(c)
+                    if fast and is_near:
+                        tally[name]["taken at once by the fast lane"] += 1
+                        lane_rows[name].append((a, c))
+                    else:
+                        tally[name]["taken at once (space to run)"] += 1
+                    continue
+                if nmaj is None:
+                    nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                if nmaj < 2:
+                    tally[name]["package: no bigger-timeframe majority"] += 1
+                    continue
+                level = (max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg
+                out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+                if out != "enter":
+                    tally[name]["package: " + out] += 1
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr2 = atr41(M, A, j1)
+                if not (atr2 == atr2 and atr2 > 0):
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+                if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                    tally[name]["package: stop / reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+                V[name].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d))
+                tally[name]["package: entered"] += 1
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+            mine = [c for aa, c in lane_rows[v] if aa == a]
+            if mine:
+                lane_rows[v] = [x for x in lane_rows[v] if x[0] != a] + [("_done", r) for r in book30(M, A, T, mine, runner, cost, usd)]
+        say("   %-7s %s" % (a, " | ".join("%s %d" % (v, len(V[v])) for v in MA_ROWS)))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   HOW OFTEN EACH LINE BROKE THE SAME WAY IN THE 24 H BEFORE A SIGNAL (all markets): " +
+        " | ".join("%s %d" % (k, n) for k, n in info.items()))
+    say("\n   THE LIVE SYSTEM AFTER B13 WITH EACH FAST LANE (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in MA_ROWS:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   THE FAST-LANE TRADES ON THEIR OWN (the signals each lane took at once that would otherwise have waited):")
+    say("   " + HEAD)
+    for v in MA_ROWS[1:]:
+        rows = [r for aa, r in lane_rows[v] if aa == "_done"]
+        say("   " + (line(v[:15], stats(rows, T0_, T1_)) if rows else "%-15s (none)" % v[:15]))
+    say("\n   WHAT HAPPENED (all markets):")
+    for v in MA_ROWS:
+        say("   %-15s %s" % (v[:15], " | ".join("%s %d" % (k, n) for k, n in tally[v].most_common())))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   %s" % a)
+        for v in MA_ROWS:
+            say("     " + line(v[:15], per[a][v]))
+    say("\n   'Package A now' should equal the 'Package A (B13)' row above; 'diagonal lane' should equal the zones test's"
+        " '1 diag fast lane'.")
+
+
+
+# =====================================================================================================================
+# THE SCENARIOS TEST (Desire 6 Oct) -- on the live system after B13 (package A, lines on closes, the 24 h diagonal lane):
+#  1. diagonal MEMORY: the lane with the diagonal broken within 3 days, 7 days, or at any time while price has not
+#     closed back across it (scenarios 2, 3, 6); lane trades split into continuations and reversals
+#  2. SAME MOVE: the diagonal broke within one 4H candle of the horizontal break (scenarios 1 and 9)
+#  3. THE SPRING (scenario 4): a 4H close through a support line (a 4H swing-low close), a 4H close back over it within
+#     6 candles, and a falling diagonal broken upward in the 24 h before the reclaim -> buy at the reclaim close, stop a
+#     tenth of a 4H move under the trap's low (mirror for sells), the market's own target and reward:risk gate
+#  4. THE EARLY EXIT (scenario 7): get out at the first 4H close back across the broken line
+#  +  YOUR QUESTION: big lines with space to run but no diagonal sent through the package instead of bought at once
+# =====================================================================================================================
+SC_ROWS = ["B13 (24h lane)", "lane 3 days", "lane 7 days", "lane while holding", "lane same move",
+           "B13 + early exit", "B13 + spring", "no-diag big->pkg"]
+SPRING_WAIT = 6
+
+
+def book30x(M, A, T, cands, runner, cost, usd, is4):
+    """book30, plus the early exit: out at the first 4H close back across the broken line (candidates with 'x')."""
+    rows, free, early = [], -1, 0
+    for c in sorted(cands, key=lambda x: x["k"]):
+        if c["k"] <= free:
+            continue
+        kk, px, risk0 = sim30(M, A, T, c["d"], c["k"], c["q"], c["stop"], c["tgt"], runner)
+        if c.get("x") is not None:
+            for k2 in range(c["k"] + 1, min(kk, T.n)):
+                if is4[k2] and c["d"] * (T.c[k2] - c["x"]) < 0:
+                    kk, px = k2, float(T.c[k2])
+                    early += 1
+                    break
+        pts = c["d"] * (px - c["q"]) - cost * c["q"]
+        rows.append(dict(t=T.t[kk], money=pts * usd, R=pts / risk0 if risk0 > 0 else 0.0, inside=False, noise=False,
+                         delay=None, give=None))
+        free = kk
+    return rows, early
+
+
+def run_scen(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nTHE SCENARIOS TEST -- diagonal memory, same move, the spring, the early exit, and space-to-run without a diagonal\n" + "=" * 110)
+    allrows = {v: [] for v in SC_ROWS}
+    lane = collections.defaultdict(list)
+    spr = {"spring + diagonal": [], "spring alone": []}
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in SC_ROWS}
+    info = collections.Counter()
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        t4c = (d4.index + pd.Timedelta(hours=4)).values
+        hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+        a4 = M.atr14(hi4, lo4, c4)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        is4 = np.isin(T.tv, t4c)
+        DL = diag_lines(M, d4)
+        dl = []                                   # (d, break index, holds until index)
+        for ln in DL:
+            if ln["brk"] is None:
+                continue
+            b, d = ln["brk"], ln["d"]
+            hold = len(c4)
+            for y in range(b + 1, min(len(c4), b + 1 + DIAG_LIFE)):
+                if d * (c4[y] - (ln["v1"] + ln["slope"] * (y - ln["i1"]))) < 0:
+                    hold = y
+                    break
+            else:
+                hold = min(len(c4), b + 1 + DIAG_LIFE)
+            dl.append((d, b, hold))
+        t1v = A["t1"].values
+        # ---- the spring (scenario 4) and its mirror ----------------------------------------------------------
+        S = {"spring + diagonal": [], "spring alone": []}
+        seen = set()
+        for x in range(2, len(c4)):
+            if not (a4[x] == a4[x] and a4[x] > 0):
+                continue
+            top = int(np.searchsorted(L.conf, t4c[x - 1], side="right"))
+            t0 = t4c[x - 1] - np.timedelta64(AHEAD_DAYS, "D")
+            for y in range(top - 1, -1, -1):
+                cf, ty, lv, _i, _ed = L.sw[y]
+                if cf < t0:
+                    break
+                d = 1 if ty == "L" else -1            # a buy springs from a support line; a sell from a resistance line
+                if d * (c4[x] - lv) <= 0 or d * (c4[x - 1] - lv) > 0:
+                    continue                          # this close must be back over the line, the last one under it
+                xs = None
+                for z in range(x - 1, max(0, x - 1 - SPRING_WAIT), -1):
+                    if d * (c4[z] - lv) < 0 and (z == 0 or d * (c4[z - 1] - lv) >= 0):
+                        xs = z
+                        break
+                if xs is None or (d, round(lv, 8), xs) in seen:
+                    continue
+                seen.add((d, round(lv, 8), xs))
+                info["springs: a close through a line and back within 6 candles"] += 1
+                trap = lo4[xs:x + 1].min() if d == 1 else hi4[xs:x + 1].max()
+                e = float(c4[x])
+                tt = pd.Timestamp(t4c[x])
+                j = int(np.searchsorted(t1v, np.datetime64(tt), side="right")) - 1
+                atr1 = float(A["atr"][j]) if j >= 0 else float("nan")
+                if not (atr1 == atr1 and atr1 > 0):
+                    continue
+                stop = float(trap - d * 0.1 * a4[x])
+                if d * (e - stop) < 0.3 * atr1:
+                    stop = e - d * 0.3 * atr1
+                if d * (e - stop) > 5 * atr1 or not M.gate_rr_ok(e, stop, atr1, cfg["min_rr"]):
+                    continue
+                tgt = None if cfg["target_atr"] is None else e + d * float(cfg["target_atr"]) * atr1
+                k = int(np.searchsorted(T.tv, np.datetime64(tt)))
+                if k >= T.n or T.t[k] != tt:
+                    continue
+                c = dict(k=k, q=e, stop=stop, tgt=tgt, d=d)
+                S["spring alone"].append(c)
+                if any(dd == d and 0 <= x - b <= 6 for dd, b, _h in dl):
+                    S["spring + diagonal"].append(c)
+                    info["springs with a diagonal broken the same way in the 24 h before the reclaim"] += 1
+        # ---- the horizontal signals on the live system -------------------------------------------------------
+        V = {v: [] for v in SC_ROWS}
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            atr = atr41(M, A, iE)
+            if not (atr == atr and atr > 0):
+                continue
+            kx = int(np.searchsorted(t4c, np.datetime64(tE), side="right")) - 1
+            tb = s.get("b_t") or s.get("t_break")
+            kb = int(np.searchsorted(t4c, np.datetime64(pd.Timestamp(tb)), side="right")) - 1 if tb is not None else -99
+            lvl, _ed, near = L.ahead_level(d, eE, tE)
+            is_near = lvl is not None and near is not None and near <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            hit = {"24h": any(dd == d and tE - pd.Timedelta(hours=24) <= pd.Timestamp(t4c[b]) <= tE for dd, b, _h in dl),
+                   "3d": any(dd == d and tE - pd.Timedelta(days=3) <= pd.Timestamp(t4c[b]) <= tE for dd, b, _h in dl),
+                   "7d": any(dd == d and tE - pd.Timedelta(days=7) <= pd.Timestamp(t4c[b]) <= tE for dd, b, _h in dl),
+                   "hold": any(dd == d and b <= kx < h for dd, b, h in dl),
+                   "same": any(dd == d and abs(b - kb) <= 1 for dd, b, _h in dl)}
+            info["signals"] += 1
+            for kname in ("24h", "3d", "7d", "hold", "same"):
+                info["diagonal %s" % kname] += hit[kname]
+            kind = "continuation" if s.get("kind") == "continuation" else "reversal"
+            nmaj = None
+            for name in SC_ROWS:
+                cond = {"lane 3 days": "3d", "lane 7 days": "7d", "lane while holding": "hold",
+                        "lane same move": "same"}.get(name, "24h")
+                fast = hit[cond]
+                if name == "no-diag big->pkg":
+                    at_once = not far and fast
+                else:
+                    at_once = not far and (not is_near or fast)
+                if at_once:
+                    struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                    stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                    strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                    if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                        tally[name]["refused by the engine's gates"] += 1
+                        continue
+                    k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                    if k >= T.n or T.t[k] != tE:
+                        continue
+                    c = dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d, x=(r2 if name == "B13 + early exit" else None))
+                    V[name].append(c)
+                    if fast and is_near:
+                        tally[name]["taken at once by the lane"] += 1
+                        if name in ("B13 (24h lane)", "lane 3 days", "lane 7 days", "lane while holding", "lane same move"):
+                            lane[(name, "all")].append((a, c))
+                            lane[(name, kind)].append((a, c))
+                    else:
+                        tally[name]["taken at once" + (" (space to run)" if not is_near else "")] += 1
+                    continue
+                if nmaj is None:
+                    nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+                if nmaj < 2:
+                    tally[name]["package: no bigger-timeframe majority"] += 1
+                    continue
+                level = (max(trg, lvl) if d == 1 else min(trg, lvl)) if is_near else trg
+                out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+                if out != "enter":
+                    tally[name]["package: " + out] += 1
+                    continue
+                q, tau = float(T.c[k]), T.t[k]
+                j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+                atr2 = atr41(M, A, j1)
+                if not (atr2 == atr2 and atr2 > 0):
+                    continue
+                stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+                if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                    tally[name]["package: stop / reward:risk"] += 1
+                    continue
+                tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+                V[name].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d, x=(r2 if name == "B13 + early exit" else None)))
+                tally[name]["package: entered"] += 1
+        V["B13 + spring"] = V["B13 + spring"] + S["spring + diagonal"]
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows, early = book30x(M, A, T, cands, runner, cost, usd, is4)
+            if early:
+                tally[v]["(early exits)"] += early
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        for key in list(lane):
+            mine = [c for aa, c in lane[key] if aa == a]
+            if mine:
+                lane[key] = [x for x in lane[key] if x[0] != a] + [("_done", r) for r in book30x(M, A, T, mine, runner, cost, usd, is4)[0]]
+        for nm, cands in S.items():
+            spr[nm] += book30x(M, A, T, cands, runner, cost, usd, is4)[0]
+        say("   %-7s %s | springs %d (with a diagonal %d)" % (a, " | ".join("%s %d" % (v, len(V[v])) for v in SC_ROWS),
+                                                         len(S["spring alone"]), len(S["spring + diagonal"])))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   HOW OFTEN (all markets): " + " | ".join("%s %d" % (k, n) for k, n in info.items()))
+    say("\n   THE LIVE SYSTEM WITH EACH CHANGE (one position per market at a time; priced on the 30m candles):")
+    say("   " + HEAD)
+    for v in SC_ROWS:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   THE LANE TRADES ON THEIR OWN (signals with a line just ahead that each lane took at once), all / continuations /"
+        " reversals:")
+    say("   " + HEAD)
+    for v in SC_ROWS[:5]:
+        for kind in ("all", "continuation", "reversal"):
+            rows = [r for aa, r in lane.get((v, kind), []) if aa == "_done"]
+            lab = (v if kind == "all" else "  " + kind)[:15]
+            say("   " + (line(lab, stats(rows, T0_, T1_)) if rows else "%-15s (none)" % lab) + ("   <- " + v if kind == "all" else ""))
+    say("\n   THE SPRING ON ITS OWN (scenario 4):")
+    say("   " + HEAD)
+    for nm, rows in spr.items():
+        say("   " + (line(nm[:15], stats(rows, T0_, T1_)) if rows else "%-15s (none)" % nm[:15]) + "   <- " + nm)
+    say("\n   WHAT HAPPENED (all markets):")
+    for v in SC_ROWS:
+        say("   %-17s %s" % (v[:17], " | ".join("%s %d" % (k, n) for k, n in tally[v].most_common())))
+    say("\n   EACH MARKET:")
+    for a in per:
+        say("   %s" % a)
+        for v in SC_ROWS:
+            say("     " + line(v[:15], per[a][v]))
+    say("\n   'B13 (24h lane)' should equal the MA test's 'diagonal lane' row. Lanes: 3 days / 7 days = the diagonal broke the same"
+        " way within that time before the signal | while holding = it broke and no 4H close has gone back across it since"
+        " (up to 10 days) | same move = within one 4H candle of the horizontal break | no-diag big->pkg = space-to-run"
+        " signals without a diagonal in the last 24 h go through the package")
+
+
+
+# =====================================================================================================================
+# B13 RESEARCH RUNS (Desire 6 Oct) -- read-only, run at the start of B13 while the rest is built.
+#  R1  THE TIGHT SPRING: only quality supports (a swing-low close that held before -- an earlier swing low within a
+#      quarter of a 4H move -- or that sits within a quarter move of a 4H brain line); a SHALLOW sweep (the closes
+#      through it stay within one 4H move of it); a QUICK reclaim (a 4H close back over it within 3 candles); with and
+#      without a 3-touch diagonal broken the same way in the 24 h before the reclaim. Mirror for sells. Shown on its
+#      own and added to B13 FINAL (package A + wick lines + the diagonal confirmation rule) -- the first run of
+#      B13's strategy changes all together.
+#  R2  DAILY AND WEEKLY BRAIN CALIBRATION: for each market, 40 brain settings on the daily and on the weekly candles;
+#      the best on the FIRST half (how often the brain's side -- up or down family -- matched the next 5 days /
+#      4 weeks), then checked on the SECOND half against the market's current settings; plus how B13-final trades
+#      did when the calibrated daily/weekly brain agreed with them vs not.
+# =====================================================================================================================
+UPS = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
+DOWNS = ("MAIN_DOWN", "NATURAL_REBOUND", "SECONDARY_REBOUND")
+CAL_GRID = [(mj, mn, du) for mj in (2.0, 2.5, 3.0, 3.5, 4.0) for mn in (0.5, 0.75, 1.0, 1.5) for du in (1, 2)]
+CAL_H = {"D1": 5, "W1": 4}
+R_ROWS = ["B13 final", "B13 final + spring"]
+
+
+def fam_series(df, major, minor, dual):
+    if os.getcwd() not in sys.path:
+        sys.path.insert(0, os.getcwd())
+    from src.execution.livermore_state_machine import LivermoreStateMachine, atr14 as lsm_atr
+    d = df[["high", "low", "close"]].astype(float)
+    atr = lsm_atr(d, 14).values
+    c = d["close"].values
+    m = LivermoreStateMachine(asset="CAL", timeframe="TEST", major_mult=major, minor_mult=minor, dual_confirm=dual, atr_period=14)
+    out = np.zeros(len(c), dtype=int)
+    for i in range(len(c)):
+        try:
+            st = str(m.update(float(c[i]), float(atr[i])).state)
+        except Exception:
+            st = ""
+        out[i] = 1 if st in UPS else (-1 if st in DOWNS else 0)
+    return out
+
+
+def hit_rate(fam, c, H, lo, hi):
+    n_hit = n = 0
+    for i in range(max(lo, 0), min(hi, len(c) - H)):
+        r = c[i + H] - c[i]
+        if fam[i] != 0 and r != 0:
+            n += 1
+            n_hit += (np.sign(r) == fam[i])
+    return (100.0 * n_hit / n if n else float("nan")), n
+
+
+def run_research(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nB13 RESEARCH RUNS -- R1 the tight spring (and B13 final all together) | R2 daily/weekly brain calibration\n" + "=" * 110)
+    allrows = {v: [] for v in R_ROWS}
+    spr = {"tight spring alone": [], "tight spring + diagonal": []}
+    trades = []                                   # (asset, entry time, direction, R) of B13-final trades, for R2
+    per, spans = {}, []
+    tally = {v: collections.Counter() for v in R_ROWS}
+    info = collections.Counter()
+    cal_rows = []
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        t4c = (d4.index + pd.Timedelta(hours=4)).values
+        hi4, lo4, c4 = (d4[x].astype(float).values for x in ("high", "low", "close"))
+        a4 = M.atr14(hi4, lo4, c4)
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        dbr = [(x["d"], x["brk"]) for x in diag_lines(M, d4) if x["brk"] is not None]
+        try:
+            b4t, _b4s, b4 = brain_lines(a, d4, "4H")
+        except Exception as ex:
+            b4t, b4 = None, None
+            say("   %-7s the 4H brain could not be run (%s) -- R1 uses 'held before' only" % (a, ex))
+        t1v = A["t1"].values
+        # ---- R1: the tight spring ------------------------------------------------------------------------------
+        S = {"tight spring alone": [], "tight spring + diagonal": []}
+        seen = set()
+        for x in range(2, len(c4)):
+            if not (a4[x] == a4[x] and a4[x] > 0):
+                continue
+            top = int(np.searchsorted(L.conf, t4c[x - 1], side="right"))
+            t0 = t4c[x - 1] - np.timedelta64(AHEAD_DAYS, "D")
+            for y in range(top - 1, -1, -1):
+                cf, ty, lv, _i, _ed = L.sw[y]
+                if cf < t0:
+                    break
+                d = 1 if ty == "L" else -1
+                if d * (c4[x] - lv) <= 0 or d * (c4[x - 1] - lv) > 0:
+                    continue
+                xs = None
+                for z in range(x - 1, max(0, x - 1 - 3), -1):          # QUICK: the sweep began within 3 candles
+                    if d * (c4[z] - lv) < 0 and (z == 0 or d * (c4[z - 1] - lv) >= 0):
+                        xs = z
+                        break
+                if xs is None or (d, round(lv, 8), xs) in seen:
+                    continue
+                if max(d * (lv - c4[z]) for z in range(xs, x)) > 1.0 * a4[x]:
+                    continue                                          # SHALLOW: a deeper drop is a real breakdown
+                held = any(ty2 == ty and abs(lv2 - lv) <= 0.25 * a4[x] and cf2 < cf and cf2 >= cf - np.timedelta64(AHEAD_DAYS, "D")
+                           for cf2, ty2, lv2, _i2, _e2 in L.sw[max(0, y - 40):y])
+                onbrain = False
+                if b4 is not None:
+                    kb = int(np.searchsorted(b4t, t4c[x - 1], side="right")) - 1
+                    if kb >= 0:
+                        onbrain = any(b4[k][kb] == b4[k][kb] and abs(b4[k][kb] - lv) <= 0.25 * a4[x] for k, _nm in ZN_KEYS)
+                if not (held or onbrain):
+                    continue                                          # QUALITY supports only
+                seen.add((d, round(lv, 8), xs))
+                info["R1 tight springs found"] += 1
+                trap = lo4[xs:x + 1].min() if d == 1 else hi4[xs:x + 1].max()
+                e = float(c4[x])
+                tt = pd.Timestamp(t4c[x])
+                j = int(np.searchsorted(t1v, np.datetime64(tt), side="right")) - 1
+                atr1 = float(A["atr"][j]) if j >= 0 else float("nan")
+                if not (atr1 == atr1 and atr1 > 0):
+                    continue
+                stop = float(trap - d * 0.1 * a4[x])
+                if d * (e - stop) < 0.3 * atr1:
+                    stop = e - d * 0.3 * atr1
+                if d * (e - stop) > 5 * atr1 or not M.gate_rr_ok(e, stop, atr1, cfg["min_rr"]):
+                    continue
+                tgt = None if cfg["target_atr"] is None else e + d * float(cfg["target_atr"]) * atr1
+                k = int(np.searchsorted(T.tv, np.datetime64(tt)))
+                if k >= T.n or T.t[k] != tt:
+                    continue
+                c = dict(k=k, q=e, stop=stop, tgt=tgt, d=d)
+                S["tight spring alone"].append(c)
+                if any(dd == d and 0 <= x - b <= 6 for dd, b in dbr):
+                    S["tight spring + diagonal"].append(c)
+                    info["R1 tight springs with a diagonal"] += 1
+        # ---- B13 final: package A + wick lines + the diagonal confirmation rule --------------------------------
+        V = {v: [] for v in R_ROWS}
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                continue
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            atr = atr41(M, A, iE)
+            if not (atr == atr and atr > 0):
+                continue
+            lw, nw = L.ahead_wick(d, eE, tE)
+            is_near = lw is not None and nw is not None and nw <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            lane = any(dd == d and tE - pd.Timedelta(hours=24) <= pd.Timestamp(t4c[b]) <= tE for dd, b in dbr)
+            info["B13 final signals"] += 1
+            info["... with an old high/low in front (wick)"] += is_near
+            info["... taken at once by the diagonal rule"] += bool(is_near and lane and not far)
+            if not far and (not is_near or lane):
+                struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                    continue
+                k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                if k >= T.n or T.t[k] != tE:
+                    continue
+                for v in R_ROWS:
+                    V[v].append(dict(k=k, q=eE, stop=float(stop), tgt=tgt, d=d))
+                continue
+            nmaj = (BW.read(tE, d) == 1) + (BD.read(tE, d) == 1) + strong4h(F4, tE, d)
+            if nmaj < 2:
+                continue
+            level = (max(trg, lw) if d == 1 else min(trg, lw)) if is_near else trg
+            out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, level, "A", 24, False)
+            if out != "enter":
+                continue
+            q, tau = float(T.c[k]), T.t[k]
+            j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+            atr2 = atr41(M, A, j1)
+            if not (atr2 == atr2 and atr2 > 0):
+                continue
+            stop, why = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+            if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                continue
+            tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+            for v in R_ROWS:
+                V[v].append(dict(k=k, q=q, stop=stop, tgt=tgt, d=d))
+        V["B13 final + spring"] = V["B13 final + spring"] + S["tight spring + diagonal"]
+        t0, t1 = A["t1"][30], A["t1"][-1]
+        spans.append((t0, t1))
+        per[a] = {}
+        for v, cands in V.items():
+            rows = book30(M, A, T, cands, runner, cost, usd)
+            per[a][v] = stats(rows, t0, t1)
+            allrows[v] += rows
+        # the B13-final trades with their entry times, for R2's separation check
+        free = -1
+        for c in sorted(V["B13 final"], key=lambda x: x["k"]):
+            if c["k"] <= free:
+                continue
+            kk, px, risk0 = sim30(M, A, T, c["d"], c["k"], c["q"], c["stop"], c["tgt"], runner)
+            pts = c["d"] * (px - c["q"]) - cost * c["q"]
+            trades.append((a, T.t[c["k"]], c["d"], pts / risk0 if risk0 > 0 else 0.0))
+            free = kk
+        for nm, cands in S.items():
+            spr[nm] += book30(M, A, T, cands, runner, cost, usd)
+        # ---- R2: calibrate the daily and weekly brains ------------------------------------------------------
+        p0 = (PIV or {}).get(a, {}) or {}
+        dflt = (p0.get("major_mult", 3.5), p0.get("minor_mult", 1.0), p0.get("dual_confirm", 2))
+        for tf, df in (("D1", D1), ("W1", W1)):
+            if df is None or len(df) < 120:
+                continue
+            c = df["close"].astype(float).values
+            n, H = len(c), CAL_H[tf]
+            half = n // 2
+            best = None
+            for g in CAL_GRID:
+                fam = fam_series(df, *g)
+                flips = int(np.sum((fam[1:half] != fam[:half - 1]) & (fam[1:half] != 0)))
+                if flips < 4:
+                    continue
+                h1, n1 = hit_rate(fam, c, H, 0, half)
+                if best is None or h1 > best[1]:
+                    best = (g, h1, fam)
+            famd = fam_series(df, *dflt)
+            hd2, nd2 = hit_rate(famd, c, H, half, n)
+            if best is None:
+                continue
+            hb2, nb2 = hit_rate(best[2], c, H, half, n)
+            end = (df.index + (pd.Timedelta(days=1) if tf == "D1" else pd.Timedelta(days=7))).values
+            cal_rows.append(dict(a=a, tf=tf, best=best[0], h1=best[1], hb2=hb2, nb2=nb2, dflt=dflt, hd2=hd2, nd2=nd2,
+                                 end=end, fam=best[2], famd=famd))
+        say("   %-7s B13 final %d | + spring %d | tight springs %d (with a diagonal %d)" % (
+            a, len(V["B13 final"]), len(V["B13 final + spring"]), len(S["tight spring alone"]), len(S["tight spring + diagonal"])))
+    if not spans:
+        return
+    T0_, T1_ = min(x[0] for x in spans), max(x[1] for x in spans)
+    say("\n   HOW OFTEN (all markets): " + " | ".join("%s %d" % (k, n) for k, n in info.items()))
+    say("\n   R1 + B13 FINAL -- the live system after B13 (package A, wick lines, the diagonal confirmation rule), and with the tight spring added:")
+    say("   " + HEAD)
+    for v in R_ROWS:
+        say("   " + line(v[:15], stats(allrows[v], T0_, T1_)))
+    say("\n   R1 -- THE TIGHT SPRING ON ITS OWN:")
+    say("   " + HEAD)
+    for nm, rows in spr.items():
+        say("   " + (line(nm[:15], stats(rows, T0_, T1_)) if rows else "%-15s (none)" % nm[:15]) + "   <- " + nm)
+    say("\n   EACH MARKET (B13 final / + spring):")
+    for a in per:
+        say("   %s" % a)
+        for v in R_ROWS:
+            say("     " + line(v[:15], per[a][v]))
+    say("\n   R2 -- DAILY AND WEEKLY BRAIN CALIBRATION: how often the brain's side matched the next %d days (daily) / %d weeks"
+        " (weekly). Best setting chosen on the FIRST half, judged on the SECOND half, against the current settings:" % (CAL_H["D1"], CAL_H["W1"]))
+    say("   %-7s %-3s %-22s %8s %8s %6s | %-16s %8s" % ("market", "tf", "best (major/minor/dual)", "1st half", "2nd half", "n", "current", "2nd half"))
+    for r in cal_rows:
+        say("   %-7s %-3s %-22s %7.1f%% %7.1f%% %6d | %-16s %7.1f%%" % (
+            r["a"], r["tf"], "%.2g / %.2g / %d" % r["best"], r["h1"], r["hb2"], r["nb2"], "%.2g / %.2g / %d" % r["dflt"], r["hd2"]))
+    for tf in ("D1", "W1"):
+        rr = [r for r in cal_rows if r["tf"] == tf and r["hb2"] == r["hb2"] and r["hd2"] == r["hd2"]]
+        if rr:
+            say("   %s average on the SECOND half: calibrated %.1f%% vs current %.1f%% (%d markets)" % (
+                tf, float(np.mean([r["hb2"] for r in rr])), float(np.mean([r["hd2"] for r in rr])), len(rr)))
+    say("\n   R2 -- B13-FINAL TRADES WHEN THE CALIBRATED / CURRENT DAILY AND WEEKLY BRAIN AGREED vs NOT (R per trade):")
+    for tf in ("D1", "W1"):
+        for lab, key in (("calibrated", "fam"), ("current", "famd")):
+            agree, against = [], []
+            for a, te, d, R in trades:
+                r = next((x for x in cal_rows if x["a"] == a and x["tf"] == tf), None)
+                if r is None:
+                    continue
+                kx = int(np.searchsorted(r["end"], np.datetime64(pd.Timestamp(te)), side="right")) - 1
+                if kx < 0:
+                    continue
+                f = r[key][kx]
+                (agree if f == d else against if f == -d else []).append(R)
+            if agree or against:
+                say("   %s %-10s agreed: %4d trades, %+.2fR each | against: %4d trades, %+.2fR each" % (
+                    tf, lab, len(agree), float(np.mean(agree)) if agree else float("nan"),
+                    len(against), float(np.mean(against)) if against else float("nan")))
+
+
+
+# =====================================================================================================================
+# B13 WEEKLY FORWARD TEST (items 24 and 28, Desire 5 Oct): all 10 markets, TODAY's rules -- entry E, package A, wick
+# lines, the diagonal confirmation rule -- replayed on the real candles; lists every trade the rules took in the last
+# FW_DAYS days (priced on 30m candles, smallest lot) next to what MT5 actually traded in the same days.
+# =====================================================================================================================
+FW_DAYS = int(os.environ.get("FW_DAYS", "7"))
+
+
+B13PKG_SINCE = pd.Timestamp("2026-10-02 21:50")     # entry E + the package went live with the restart at 23:52 box time
+                                                    # on 2 Oct = 21:52 MT5 time (the box clock runs 2 h ahead: the 2 Oct
+                                                    # close-all logs at 16:19, MT5 shows 14:19) -- Stephen's 5 Oct check
+TRACE_BEFORE_H = 26                                 # a live entry can come up to ~25 h after its signal (package)
+
+
+def _votes(BW, BD, F4, tE, d):
+    w, dd, h4 = BW.read(tE, d), BD.read(tE, d), strong4h(F4, tE, d)
+    lab = {1: "with", -1: "against", 0: "mixed"}
+    n = (w == 1) + (dd == 1) + int(bool(h4))
+    return n, "weekly %s, daily %s, 4H %s" % (lab.get(w, w), lab.get(dd, dd), "strong" if h4 else "not strong")
+
+
+def run_forward(data, frames, pcfg, costs, lots):
+    M = load_engine("4H/1H", False)
+    say("\n" + "=" * 110 + "\nB13 WEEKLY FORWARD TEST -- today's rules on all markets, last %d days, vs what MT5 traded\n" % FW_DAYS + "=" * 110)
+    if not data:
+        say("   NO PRICE FILES COULD BE READ (data\\raw\\*_1h.csv) -- nothing to replay; refresh the files and run again")
+        return
+    now = max(df.index[-1] for df in data.values()) + pd.Timedelta(hours=1)
+    since = now - pd.Timedelta(days=FW_DAYS)
+    rows_all, trace = [], []
+    for a, df1 in data.items():
+        cfg = M.market_settings(a, pcfg)
+        fr = frames.get(a, {})
+        if cfg is None or fr.get("M30") is None or len(fr["M30"]) < 1000:
+            say("   %-7s skipped (no settings or no 30m candles)" % a)
+            continue
+        A = arrays(df1, False, M)
+        T = Thirty(fr["M30"])
+        cost, usd, runner = costs.get(a, 0.0005), lots[a][0], cfg["exit"] == "RUNNER"
+        pE = json.loads(json.dumps(pcfg or {}, default=str))
+        pE.setdefault("ns_markets", {}).setdefault(a, {})
+        pE["ns_markets"][a] = dict(pE["ns_markets"][a], entry="E")
+        # B14: this replay re-runs the B13 entry rules (decide() below) -- with the B14 switch on it would look for a
+        # line map that only the live bot builds. What the B14 rules did live is listed under B14 TRACKING.
+        pE["b14_rules_enabled"] = False
+        cfgE = M.market_settings(a, pE)
+        engE, ends, alive = run_engine(M, a, df1, pE)
+        setups = {s["id"]: s for s, _r, _t in ends}
+        for s in alive:
+            setups[s["id"]] = s
+        d4 = M.hourly_to_4h(df1)
+        t4c = (d4.index + pd.Timedelta(hours=4)).values
+        L = Levels(M, d4)
+        F4 = TF(M, d4, 4)
+        D1, W1 = fr.get("D1"), fr.get("W1")
+        agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+        if D1 is None:
+            D1 = df1.resample("1D").agg(agg).dropna()
+        if W1 is None:
+            W1 = df1.resample("W-SUN", label="left", closed="left").agg(agg).dropna()
+        BW, BD = Bigger(W1, pd.Timedelta(days=7)), Bigger(D1, pd.Timedelta(days=1))
+        dbr = [(x["d"], x["brk"]) for x in diag_lines(M, d4) if x["brk"] is not None]
+        t1v = A["t1"].values
+        C = []
+
+        def decide(s, d, r2, r1, tt, iE, trg, istart, tE, eE, atr, rules):
+            """What one rule set does with one entry-E signal -> (text, candidate or None).
+            B13  = old high/low in front judged on WICKS, the diagonal confirmation rule, package version A
+            LIVE = what ran 2-6 Oct: old high/low on CLOSES, no diagonal rule, package middle way, far package
+                   entries refused at sending (the freshness check B13 item 30 removes)"""
+            if rules == "B13":
+                lv, dist = L.ahead_wick(d, eE, tE)
+            else:
+                lv, _ed, dist = L.ahead_level(d, eE, tE)
+            near = lv is not None and dist is not None and dist <= NEAR
+            far = d * (eE - r2) / atr > M.FRESH_ATR
+            brk = [pd.Timestamp(t4c[b]) for dd, b in dbr if dd == d and tE - pd.Timedelta(hours=24) <= pd.Timestamp(t4c[b]) <= tE]
+            lane = rules == "B13" and bool(brk)
+            hl = "high" if d == 1 else "low"
+            if not far and (not near or lane):
+                struct = float(A["lo"][istart:iE + 1].min()) if d == 1 else float(A["hi"][istart:iE + 1].max())
+                stop, tgt = stop_for(M, cfgE, d, eE, r2, atr, struct, None)
+                strength = M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE])
+                if stop is None or not gated(M, cfgE, s, "E", eE, atr, stop, strength):
+                    return "REFUSED by the engine's own gates (stop / reward:risk / strength)", None
+                why = ("diagonal rule: old %s %.6g just ahead, but a diagonal broke %s" % (hl, lv, str(max(brk))[5:16])
+                       if near else ("space to run (nearest old %s %.6g, %.2f moves)" % (hl, lv, dist) if lv is not None
+                                     else "space to run (no old %s ahead)" % hl))
+                k = int(np.searchsorted(T.tv, np.datetime64(tE)))
+                if k < T.n and T.t[k] == tE:
+                    return "TAKEN AT ONCE at %.6g -- %s" % (eE, why), dict(
+                        k=k, q=eE, stop=float(stop), tgt=tgt, d=d, kind=s.get("kind"),
+                        how=("diagonal rule" if near else "at once"))
+                return "TAKEN AT ONCE -- %s (no 30m candle to price it)" % why, None
+            why = ("FAR entry (%.1f moves from the line)" % (d * (eE - r2) / atr)) if far else \
+                  ("old %s %.6g just ahead (%.2f moves, by %s)" % (hl, lv, dist, "wick" if rules == "B13" else "close"))
+            nmaj, vtxt = _votes(BW, BD, F4, tE, d)
+            if nmaj < 2:
+                return "PACKAGE (%s) -> NO TRADE: bigger timeframes %d of 3 (%s)" % (why, nmaj, vtxt), None
+            level = (max(trg, lv) if d == 1 else min(trg, lv)) if near else trg
+            out, k, how2 = judge(A, T, F4, d, tE, r2, r1, trg, level, "A" if rules == "B13" else "MID", 24, False)
+            if out != "enter":
+                said = {"weak": "CANCELLED (the closes fell back)", "expired": "EXPIRED (24 h, never proven)",
+                        "died": "DIED (a 4H close past the setup's origin)",
+                        "watching": "still WATCHING at the end of the data"}.get(out, out)
+                return "PACKAGE (%s; votes %d of 3) -> %s" % (why, nmaj, said), None
+            q, tau = float(T.c[k]), T.t[k]
+            j1 = int(np.searchsorted(t1v, np.datetime64(tau), side="right")) - 1
+            atr2 = atr41(M, A, j1)
+            if not (atr2 == atr2 and atr2 > 0):
+                return "PACKAGE (%s) -> proven, but no move size to place a stop" % why, None
+            stop, why2 = place_stop(M, T, cfg, d, k, q, r2, tt, atr2, "HL", True)
+            if stop is None or not M.gate_rr_ok(q, stop, atr2, cfg["min_rr"]):
+                return "PACKAGE (%s) -> proven %s, but NOT TAKEN: %s" % (why, str(tau)[5:16], why2 or "reward:risk"), None
+            if rules == "LIVE" and far:
+                return ("PACKAGE (%s) -> proven %s at %.6g, but REFUSED AT SENDING (freshness check -- B13 item 30 "
+                        "removes this)" % (why, str(tau)[5:16], q)), None
+            tgt = None if cfg["target_atr"] is None else q + d * float(cfg["target_atr"]) * atr2
+            return "PACKAGE (%s; votes %d of 3) -> ENTERED %s at %.6g (%s)" % (why, nmaj, str(tau)[5:16], q, how2), dict(
+                k=k, q=q, stop=stop, tgt=tgt, d=d, kind=s.get("kind"), how="package (%s)" % ("far" if far else "old high ahead"))
+
+        for sid, s in setups.items():
+            d = s["d"]
+            if cfg.get("cont_only") and s["kind"] != "continuation":
+                continue
+            r2, r1 = float(s["r2"]), float(s["r1"])
+            tt = s.get("t_touch")
+            if tt is None:
+                continue
+            got = ct_trigger(M, s, A, "E", L.atr_at)
+            if got is None:
+                continue
+            iE, trg, istart = got
+            tE, eE = A["t1"][iE], float(A["cl"][iE])
+            if tE < since - pd.Timedelta(days=2):
+                continue
+            if cfg.get("no_spike") and M.candle_strength(d, A["hi"][iE], A["lo"][iE], A["cl"][iE]) > M.SPIKE:
+                if tE >= since - pd.Timedelta(hours=TRACE_BEFORE_H):
+                    trace.append(dict(a=a, d=d, t=tE, r2=r2, e=eE, kind=s.get("kind"), b13="SKIPPED: spike candle",
+                                      live="SKIPPED: spike candle"))
+                continue
+            atr = atr41(M, A, iE)
+            if not (atr == atr and atr > 0):
+                continue
+            txt_b, cand = decide(s, d, r2, r1, tt, iE, trg, istart, tE, eE, atr, "B13")
+            txt_l, _c = decide(s, d, r2, r1, tt, iE, trg, istart, tE, eE, atr, "LIVE")
+            if cand is not None:
+                C.append(cand)
+            if tE >= since - pd.Timedelta(hours=TRACE_BEFORE_H):
+                trace.append(dict(a=a, d=d, t=tE, r2=r2, e=eE, kind=s.get("kind"), b13=txt_b, live=txt_l))
+        free = -1
+        for c in sorted(C, key=lambda x: x["k"]):
+            if c["k"] <= free:
+                continue
+            kk, px, risk0 = sim30(M, A, T, c["d"], c["k"], c["q"], c["stop"], c["tgt"], runner)
+            free = kk
+            if T.t[c["k"]] < since:
+                continue
+            pts = c["d"] * (px - c["q"]) - cost * c["q"]
+            rows_all.append((a, "BUY" if c["d"] == 1 else "SELL", T.t[c["k"]], c["q"], c["stop"], T.t[kk], px,
+                             pts / risk0 if risk0 > 0 else 0.0, pts * usd, c["how"], c.get("kind")))
+    say("\n   THE RULES' TRADES, %s to %s (entries in the window; exits may be later or still open at the end of data):"
+        % (str(since)[:16], str(now)[:16]))
+    say("   %-7s %-4s %-16s %-11s %-11s %-16s %-11s %6s %9s  %s" % ("market", "side", "entry time", "entry", "stop",
+                                                                 "exit time", "exit", "R", "$", "how / setup"))
+    for r in sorted(rows_all, key=lambda x: x[2]):
+        say("   %-7s %-4s %-16s %-11.6g %-11.6g %-16s %-11.6g %+6.2f %+9.2f  %s / %s" % (
+            r[0], r[1], str(r[2])[:16], r[3], r[4], str(r[5])[:16], r[6], r[7], r[8], r[9], r[10]))
+    say("   TOTAL: %d trades | %+.2f R | %+.2f $ at the smallest lot" % (
+        len(rows_all), sum(r[7] for r in rows_all), sum(r[8] for r in rows_all)))
+    live_pos = []
+    try:
+        import MetaTrader5 as _mt5
+        _mt5.initialize()
+        deals = _mt5.history_deals_get(since.to_pydatetime(), (now + pd.Timedelta(days=1)).to_pydatetime()) or []
+        pos = {}
+        for dl in deals:
+            p = pos.setdefault(dl.position_id, {"sym": dl.symbol, "in": None, "out": None, "profit": 0.0})
+            p["profit"] += float(dl.profit) + float(getattr(dl, "commission", 0.0)) + float(getattr(dl, "swap", 0.0))
+            if dl.entry == 0:
+                p["in"] = dl
+            elif dl.entry == 1:
+                p["out"] = dl
+        say("\n   WHAT MT5 ACTUALLY TRADED in the same days (closed positions):")
+        tot = 0.0
+        for pid, p in sorted(pos.items(), key=lambda kv: (kv[1]["in"].time if kv[1]["in"] else 0)):
+            if p["in"] is None:
+                continue
+            tot += p["profit"] if p["out"] is not None else 0.0
+            t_in = pd.Timestamp(p["in"].time, unit="s")
+            live_pos.append((p["sym"], 1 if p["in"].type == 0 else -1, t_in, float(p["in"].price), p["profit"]))
+            say("   %-10s %-4s opened %s at %-11.6g %s  profit %+.2f" % (
+                p["sym"], "BUY" if p["in"].type == 0 else "SELL", t_in.strftime("%Y-%m-%d %H:%M"), p["in"].price,
+                ("closed %s at %.6g" % (pd.Timestamp(p["out"].time, unit="s").strftime("%Y-%m-%d %H:%M"), p["out"].price))
+                if p["out"] is not None else "STILL OPEN", p["profit"]))
+        say("   MT5 TOTAL (closed): %+.2f $" % tot)
+    except Exception as ex:
+        say("   (MT5 history not available here: %s)" % ex)
+    # ---- the trace (Desire 7 Oct): for every live trade, which rule passed on it or took it, and why ----------------
+    sym2a = {v: k for k, v in MARKETS.items()}
+    sym2a.update({v.rstrip("m"): k for k, v in MARKETS.items()})
+    say("\n   TRACE 1 -- EVERY LIVE MT5 TRADE AND WHAT EACH RULE SET DID WITH ITS SIGNAL (signals up to %d h before the open)"
+        % TRACE_BEFORE_H)
+    say("   B13 = after B13 (wick lines, diagonal rule, package A) | LIVE = the rules that ran 2-6 Oct (closes, middle way)")
+    if not live_pos:
+        say("   (no MT5 history here)")
+    for sym, d, t_in, px, prof in live_pos:
+        a = sym2a.get(sym, sym2a.get(str(sym).rstrip("m"), sym))
+        say("   %s %s opened %s at %.6g (%+.2f)" % (a, "BUY" if d == 1 else "SELL", t_in.strftime("%m-%d %H:%M"), px, prof))
+        hits = [r for r in trace if r["a"] == a and r["d"] == d and t_in - pd.Timedelta(hours=TRACE_BEFORE_H) <= r["t"] <= t_in + pd.Timedelta(hours=1)]
+        if not hits:
+            say("      no entry-E signal from the engine in the %d h before -- %s" % (
+                TRACE_BEFORE_H, "the live bot used the OLD entries then (before the switch to entry E on 2 Oct)"
+                if t_in < B13PKG_SINCE else "this trade did not come from an entry-E signal: check the log at that time"))
+        for r in hits:
+            say("      signal %s  line %.6g  E close %.6g  (%s)" % (r["t"].strftime("%m-%d %H:%M"), r["r2"], r["e"], r["kind"]))
+            say("        B13 : %s" % r["b13"])
+            say("        LIVE: %s" % r["live"])
+    say("\n   TRACE 2 -- EVERY ENTRY-E SIGNAL IN THE WINDOW (both rule sets):")
+    for r in sorted(trace, key=lambda x: x["t"]):
+        if r["t"] < since:
+            continue
+        say("   %-7s %-4s %s  line %-10.6g E %-10.6g %s" % (r["a"], "BUY" if r["d"] == 1 else "SELL", r["t"].strftime("%m-%d %H:%M"),
+                                                          r["r2"], r["e"], r["kind"]))
+        say("        B13 : %s" % r["b13"])
+        say("        LIVE: %s" % r["live"])
+    say("\n   READ: a live trade with no B13 entry shows which B13 rule passed on it; 'LIVE: TAKEN' with no MT5 trade means a"
+        " live-only check stopped it (health, session, council, MT5) -- look in the log at that time.")
+
+
+# =====================================================================================================================
+# B14 item 9.3 (Desire 9 Oct): the witness, the lock and the staircase, from the bot's own log lines
+# =====================================================================================================================
+B14_TAGS = ("[NS-ROUTE]", "[PKG-HANDOVER]", "[PKG-ENTER]", "[PKG-CANCEL]", "[PKG-REARM]", "[PKG-OUTCOME]", "[NS-PROOF]",
+            "[NS-LOCK]", "[NS-STAIR]", "[NS-STAIR-FAIL]", "[NS-WALLS]", "[RUNNER-RUN]", "[NS-REBUILD]", "[NS-MAP]",
+            "[NS-STOP-HOLD]")
+
+
+def b14_tracking(days, pcfg):
+    """Reads the last `days` of logs\trading_bot.log* and lists, market by market and in time order, what the B14 rules
+    did: each signal taken at once (with its witness), each hand-over (why it waited), each package outcome, each
+    re-arm, each RUNNER run, each wall lock and staircase step -- and any line saying one of them failed."""
+    say("\n" + "=" * 110 + "\nB14 TRACKING -- the witness, the lock and the staircase (the bot's own log lines, last %d days, box time)\n" % days + "=" * 110)
+    say("   new rules switch (phase_config.b14_rules_enabled): %s" % ("ON" if (pcfg or {}).get("b14_rules_enabled") else
+                                                                       "OFF -- no witness / lock / staircase lines are expected yet"))
+    since = pd.Timestamp.now() - pd.Timedelta(days=days)
+    rx = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+    ev = collections.defaultdict(list)
+    cnt = collections.Counter()
+    for f in sorted(glob.glob(os.path.join("logs", "trading_bot.log*")), key=os.path.getmtime):
+        try:
+            fh = open(f, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                if "[N" not in line and "[P" not in line and "[R" not in line:
+                    continue
+                m = rx.match(line)
+                if not m:
+                    continue
+                t = pd.Timestamp(m.group(1))
+                if t < since:
+                    continue
+                msg = line.split(" - ", 3)[-1].strip()
+                for tag in B14_TAGS:
+                    if msg.startswith(tag):
+                        a = msg[len(tag):].strip().split(":", 1)[0].split()[0] if ":" in msg else "?"
+                        ev[a].append((t, tag, msg))
+                        cnt[tag] += 1
+                        break
+    if not ev:
+        say("   no B14 lines in the last %d days" % days)
+        return
+    say("   counts: " + ", ".join("%s %d" % kv for kv in sorted(cnt.items())))
+    bad = cnt["[NS-STAIR-FAIL]"] + cnt["[NS-WALLS]"] + cnt["[NS-MAP]"] + sum(
+        1 for a in ev for _t, tag, msg in ev[a] if tag == "[NS-STOP-HOLD]" and "ns_wall" in msg)
+    say("   failures (stair not fed / no map / a lock or step held by the guard): %d %s" % (bad, "" if not bad else "<-- tell Claude"))
+    for a in sorted(ev):
+        say("\n   %s" % a)
+        for t, tag, msg in sorted(ev[a]):
+            if tag == "[NS-STOP-HOLD]" and "ns_wall" not in msg:
+                continue
+            say("      %s  %s" % (str(t)[5:16], msg[:200]))
+
+
+def main():
+    say("=== TBOT B13 WEEKLY FORWARD TEST (read-only) -- today's rules, all markets, last %d days vs MT5 ===" % FW_DAYS)
+    try:
+        sha = hashlib.sha256(open(ENGINE, "rb").read().replace(b"\r\n", b"\n")).hexdigest().upper()   # same fingerprint whatever the line endings
+    except OSError as e:
+        say("   cannot read %s (%s) -- run this from C:\\TradingBot\\TBOT" % (ENGINE, e))
+        return
+    say("   engine: %s" % ("the B14 engine (9 Oct) -- the same code this test was built against" if sha == ENGINE_SHA else
+                           "DIFFERENT from the version this test was built against (%s...) -- results may not match the bot; tell Claude" % sha[:16]))
+    say("   %s" % stub_brain())
+    try:
+        pcfg = json.load(open(os.path.join("config", "config.json"), encoding="utf-8-sig")).get("phase_config", {})
+        say("   live settings: config/config.json phase_config (%d market override(s))" % len(pcfg.get("ns_markets") or {}))
+    except Exception as e:
+        pcfg = {}
+        say("   config/config.json not read (%s) -- engine defaults used" % e)
+    if pcfg.get("b14_rules_enabled"):
+        say("   NOTE: the B14 rules are ON live. The replay below re-runs the B13 entry rules for comparison; what the B14"
+            " rules did (routes, witnesses, package outcomes, locks, staircase steps) is listed under B14 TRACKING at the end.")
+    costs, live_proofs = read_logs()
+    lots, spreads = lot_values()
+    data, frames = {}, {}
+    for a, sym in MARKETS.items():
+        if a not in costs and spreads.get(a):
+            costs[a] = spreads[a]
+        df, note = load_1h(sym)
+        fr = mt5_frames(sym)
+        frames[a] = fr
+        cov = " | ".join("%s %d from %s" % (k, len(v), str(v.index[0])[:10]) for k, v in fr.items()) or "MT5 frames not available"
+        say("   %-7s %s | cost %.5f | lot $%.4g per 1.0 | %s" % (a, note, costs.get(a, 0.0005), lots[a][0], cov))
+        if df is not None and len(df) > 500:
+            data[a] = df
+    try:
+        import MetaTrader5 as mt5
+        mt5.shutdown()
+    except Exception:
+        pass
+    global PIV
+    try:
+        PIV = json.load(open(os.path.join("config", "aggregator_presets.json"), encoding="utf-8-sig")).get("LIVERMORE_PIVOTS") or {}
+    except Exception:
+        PIV = {}
+    run_forward(data, frames, pcfg, costs, lots)
+    say("\n   RULES: entry E = 4H break, 1H retest, first 1H close past the peak | at once = no old 4H high/low within half a 4H"
+        " move ahead (B13: by wick; LIVE: by close) | diagonal rule (B13) = a 3-touch diagonal broke the same way in the 24 h"
+        " before -> taken at once anyway | package = 2 of 3 bigger timeframes, then the 1H and two 30m closes past the old"
+        " high/low within 24 h (B13: version A; LIVE: middle way) | priced on 30m candles at the smallest lot")
+    b14_tracking(FW_DAYS, pcfg)                                   # B14 item 9.3
+    say("\n=== END OF THE B13 WEEKLY FORWARD TEST (%.0f s) ===" % (time.time() - T0))
+
+
+if __name__ == "__main__":
+    main()

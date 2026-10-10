@@ -1,7 +1,15 @@
 import os, shutil, pandas as pd
 from datetime import datetime, timezone
 mt5 = __import__("MetaTrader5")
-print("MT5 connected:", mt5.initialize())
+# B14 item 7.5 (Desire 5 Oct ruling): without MT5 this tool used to print "MT5 connected: False" and carry on,
+# so nothing was repaired and the Saturday job still looked fine. It now stops with an error code, so the job
+# reports the failure (and sends its Telegram).
+import sys as _sys
+_ok = mt5.initialize()
+print("MT5 connected:", _ok)
+if not _ok:
+    print("FAILED: MT5 is not connected (" + str(mt5.last_error()) + ") -- nothing was repaired.")
+    _sys.exit(2)
 SYMS = ["BTCUSDm", "XAUUSDm", "USTECm", "EURUSDm", "USOILm", "GBPAUDm", "JP225m", "EURJPYm", "XAGUSDm", "AUDJPYm"]
 TFS = [("15m", mt5.TIMEFRAME_M15, 0.25), ("1h", mt5.TIMEFRAME_H1, 1.0), ("4h", mt5.TIMEFRAME_H4, 4.0)]
 NOW = datetime.now(timezone.utc)

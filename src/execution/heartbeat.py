@@ -267,7 +267,10 @@ class HeartbeatMonitor:
         # process (or the tail handler) has been alive can only ever read
         # as a false absence. Skip silently after the first log.
         uptime_s = time.time() - self.handler.started_at
-        if window_min * 60 > uptime_s:
+        # B14 item 7.9: a check marked "no_warmup" (B14's "this must never happen" checks: max only) runs from the
+        # start -- a short log cannot make such a count falsely high, and the first day after a restart (the day new
+        # code runs for the first time) is not left blind. Every other check keeps its warm-up exactly as before.
+        if window_min * 60 > uptime_s and not (p.get("no_warmup") and _min is None):
             if pid not in self._warmup_logged:
                 self._warmup_logged.add(pid)
                 logger.info("[HEARTBEAT] WARMUP skip %s (uptime %.0fmin < window %dmin)",
@@ -424,12 +427,15 @@ class HeartbeatMonitor:
         else:
             lines = self._lines_in_window(snap, window_min)
         tag_match = self._tag_matcher(tag)
+        # B14 item 7.1 (Desire 8 Oct): gates that log a block with no signal to record (ny_open blocks a cycle with
+        # zero signals, so no practice row can exist) are listed in the check's "skip_gates" and not compared
+        _skip = set(p.get("skip_gates") or [])
         _log_counts = {}
         for msg in lines:
             if not tag_match(msg):
                 continue
             m = re.search(r"gate_id=(\S+)", msg)
-            if m:
+            if m and m.group(1) not in _skip:
                 gid = m.group(1)
                 _log_counts[gid] = _log_counts.get(gid, 0) + 1
         if not _log_counts:

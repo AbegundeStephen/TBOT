@@ -640,6 +640,10 @@ class MT5ExecutionHandler:
                     if _cs_sz.get("ns_exit") and _cs_sz.get("ns_r2") and _cs_sz.get("ns_atr1"):
                         _st_sz, _ = _ns_levels_sz(1 if signal == 1 else -1, float(current_price), float(_cs_sz["ns_r2"]),
                                                   float(_cs_sz["ns_atr1"]), float(risk_config.get("min_sl_pct", 0.0) or 0.0), None)
+                        # B14 (knock-on of item 1.1): a package entry is sized on the package's own stop
+                        if _st_sz is not None and _cs_sz.get("ns_entry") == "PKG" and _cs_sz.get("ns_stop") not in (None, "None") \
+                                and (1 if signal == 1 else -1) * (float(current_price) - float(_cs_sz["ns_stop"])) > 0:
+                            _st_sz = float(_cs_sz["ns_stop"])
                         if _st_sz is not None:
                             initial_sl_dist = abs(float(current_price) - float(_st_sz))
                             logger.info(f"[NS-SIZE] {asset}: sizing on the tested stop {_st_sz:.5g} ({initial_sl_dist:.5g} away)")

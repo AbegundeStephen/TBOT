@@ -1,7 +1,15 @@
 import pandas as pd
 from datetime import datetime
 mt5 = __import__("MetaTrader5")
-print("MT5 connected:", mt5.initialize())
+# B14 item 7.5 (Desire 5 Oct ruling): without MT5 this tool used to print "MT5 connected: False" and carry on,
+# so nothing was checked and the Saturday job still looked fine. It now stops with an error code, so the job
+# reports the failure (and sends its Telegram).
+import sys as _sys
+_ok = mt5.initialize()
+print("MT5 connected:", _ok)
+if not _ok:
+    print("FAILED: MT5 is not connected (" + str(mt5.last_error()) + ") -- nothing was checked.")
+    _sys.exit(2)
 S = {"BTC": "BTCUSDm", "GOLD": "XAUUSDm", "USTEC": "USTECm", "EURUSD": "EURUSDm", "USOIL": "USOILm", "GBPAUD": "GBPAUDm"}
 T = [("1h", mt5.TIMEFRAME_H1, 1), ("4h", mt5.TIMEFRAME_H4, 4)]
 F = {(a, tf): pd.read_csv("data/raw/%s_%s.csv" % (s, tf), parse_dates=[0], index_col=0) for a, s in S.items() for tf, k, h in T}
