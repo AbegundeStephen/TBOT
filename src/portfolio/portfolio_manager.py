@@ -1083,11 +1083,41 @@ class PortfolioManager:
                         f"[STATE] Failed to clean up temp file {temp_file_path}: {e_del}"
                     )
 
+    def _restore_system_metrics(self):
+        """B14 item 2.5: peak equity, losing streak and today's realised P&L from data/system_state.json -- the same
+        values and the same mode check as before, now on every start (flat or not)."""
+        try:
+            system_state = load_system_state()
+            if not system_state:
+                logger.info("[STATE] No saved account metrics -- peak equity and losing streak start fresh")
+                return
+            saved_mode = system_state.get("mode")
+            if saved_mode == self.mode:
+                self.peak_equity = system_state.get("peak_equity", self.peak_equity)
+                self.loss_streak = system_state.get("loss_streak", 0)
+                self.realized_pnl_today = system_state.get("realized_pnl_today", 0.0)
+                logger.info(
+                    f"[STATE] Metrics restored for {self.mode.upper()} mode: "
+                    f"Peak Equity=${self.peak_equity:,.2f}, Loss Streak={self.loss_streak}"
+                )
+            else:
+                logger.warning(
+                    f"[STATE] Skipping metrics restore: Mode mismatch "
+                    f"(Current: {self.mode.upper()}, Saved: {str(saved_mode).upper()})"
+                )
+        except Exception as _rm_e:
+            logger.error(f"[STATE] Account metrics restore failed: {_rm_e}")
+
     def load_portfolio_state(self, data_manager):
         """Loads open positions from a file and re-initializes them."""
         if self.is_paper_mode:
             logger.info("[STATE] Paper mode, skipping state load.")
             return
+
+        # B14 item 2.5 (Desire 8 Oct): the peak and the losing streak come back on EVERY restart. They used to be
+        # restored only when the positions file held an open trade, so a restart while flat forgot both (the 15%
+        # top brake and the 5-loss brake started from scratch).
+        self._restore_system_metrics()
 
         if not self.state_file.exists():
             logger.info("[STATE] No portfolio state file found. Starting fresh.")
@@ -1109,27 +1139,7 @@ class PortfolioManager:
                 logger.info("[STATE] Portfolio state file is empty.")
                 return
 
-            # ✨ NEW: Restore non-picklable system metrics from JSON
-            system_state = load_system_state()
-            if system_state:
-                saved_mode = system_state.get("mode")
-
-                # Only restore metrics if the mode matches
-                if saved_mode == self.mode:
-                    self.peak_equity = system_state.get("peak_equity", self.peak_equity)
-                    self.loss_streak = system_state.get("loss_streak", 0)
-                    self.realized_pnl_today = system_state.get(
-                        "realized_pnl_today", 0.0
-                    )
-                    logger.info(
-                        f"[STATE] Metrics restored for {self.mode.upper()} mode: "
-                        f"Peak Equity=${self.peak_equity:,.2f}, Loss Streak={self.loss_streak}"
-                    )
-                else:
-                    logger.warning(
-                        f"[STATE] Skipping metrics restore: Mode mismatch "
-                        f"(Current: {self.mode.upper()}, Saved: {str(saved_mode).upper()})"
-                    )
+            # B14 item 2.5: the account metrics were restored above (_restore_system_metrics), before any return
 
             for position_id, position in loaded_positions.items():
                 logger.info(
@@ -1826,7 +1836,10 @@ class PortfolioManager:
         if getattr(self, "_circuit_breaker_override", False):
             return False, ""
 
-        if self.session_start_equity and self.session_start_equity > 0:
+        # B14 item 2.1 (Desire 8 Oct): the day brake is off when risk_management.daily_loss_brakes_enabled is false.
+        # A missing key keeps it on, exactly as before (so an old config can never switch a brake off by accident).
+        _day_brakes_on = bool(self.risk_cfg.get("daily_loss_brakes_enabled", True))
+        if _day_brakes_on and self.session_start_equity and self.session_start_equity > 0:
             daily_loss = (
                 self.session_start_equity - self.equity
             ) / self.session_start_equity
@@ -1851,7 +1864,8 @@ class PortfolioManager:
             profit_lock_threshold = self.portfolio_config.get(
                 "profit_lock_threshold", 0.15
             )
-            if drawdown > profit_lock_threshold:
+            # B14 item 2.3 (Desire 8 Oct): off when portfolio.profit_lock_enabled is false (missing = on, as before)
+            if bool(self.portfolio_config.get("profit_lock_enabled", True)) and drawdown > profit_lock_threshold:
                 reason = f"PROFIT LOCK: Equity dropped {drawdown:.1%} from peak. Protecting gains."
                 send_alert(reason)
                 return True, reason

@@ -218,7 +218,15 @@ class MultiTimeFrameRegimeDetector:
                 # false-positives during normal operation.
                 # 4h: kept at 6.0h — live logs showed 5.3h actual staleness on
                 #      multiple cycles due to fixed UTC bar boundaries + fetch latency.
-                stale_threshold = {"1h": 3.5, "4h": 6.0, "1d": 24.0}.get(timeframe_str, 4.0)
+                # B14 item 14.1 A (Desire 9 Oct): a saved price file is stamped with its last CLOSED candle's open
+                # time, so a 4H file is legitimately up to ~8 h old and a daily one up to ~2 days (4 over a weekend)
+                # -- the old 6 h / 24 h limits made the bot re-download them over and over. 1H stays at 3.5 h. Daily is
+                # 49 h, not 48: right after midnight the file waits for the hourly price update before it gains the
+                # day that just closed. (No weekly file is read here.)
+                stale_threshold = {"1h": 3.5, "4h": 8.5, "1d": 49.0}.get(timeframe_str, 4.0)
+                if timeframe_str == "1d" and any(_dd.weekday() == 5 for _dd in pd.date_range(
+                        latest_date.normalize(), now.normalize(), freq="D")):
+                    stale_threshold += 48.0                      # the gap spans a weekend (no Saturday/Sunday candles)
                 if hours_old > stale_threshold or pd.isna(hours_old):
                     logger.warning(f"[CSV] Data is {hours_old:.1f}h old (limit={stale_threshold}h) - FALLING BACK TO API")
                     return self._fetch_data(symbol, timeframe_str, exchange)

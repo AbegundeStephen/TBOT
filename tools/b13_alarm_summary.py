@@ -23,7 +23,12 @@ for f in sorted(glob.glob(os.path.join("logs", "trading_bot.log*"))):
                 for tag in ("Traceback", "[NS-PROOF]", "[PKG-HANDOVER]", "[PKG-ENTER]", "[PKG-CANCEL]", "[DIAG-CONFIRM]",
                             "Trade Opened", "[TRADE_EVENT] {\"event\": \"ENTRY\"", "[TRADE_EVENT] {\"event\": \"EXIT\"",
                             "[SAFETY]", "[FRESHNESS]", "[STOP] SHUTTING DOWN", "[WATCHDOG] MT5 connection lost",
-                            "[CIRCUIT BREAKER] Halted", "[HEALTH] System is UNHEALTHY"):
+                            "[CIRCUIT BREAKER] Halted", "[HEALTH] System is UNHEALTHY",
+                            # B14 (Desire 8-9 Oct): the new lines -- package outcomes, rebuilds, routes, locks, steps
+                            "[PKG-OUTCOME]", "EXPIRED: no trading look", "[PKG-REARM]", "[NS-REBUILD]", "[NS-ROUTE]",
+                            "[NS-LOCK]", "[NS-STAIR]", "[NS-STAIR-FAIL]", "[NS-WALLS]", "[RUNNER-RUN]", "[NS-MAP]",
+                            "[LOOK] the", "[CONFIG] these markets run on",
+                            "[STATE] Account metrics restore failed", "[STATE] Skipping metrics restore"):
                     if tag in line:
                         cnt[tag] += 1
     except Exception as e:
@@ -36,6 +41,7 @@ msg.append("Errors by tag: " + (", ".join("%s x%d" % kv for kv in errors.most_co
 msg.append("Events: " + (", ".join("%s x%d" % kv for kv in cnt.most_common()) if cnt else "none"))
 text = "\n".join(msg)
 print(text)
+_sent = False          # B14: a summary that could not be sent ends with exit code 1, so tools\b14_task.ps1 reports it
 try:
     env = {}
     for l in open(".env", encoding="utf-8", errors="replace"):
@@ -51,7 +57,9 @@ try:
                                          headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=15).read()
         print("sent to Telegram")
+        _sent = True
     else:
         print("NOT SENT: TELEGRAM_BOT_TOKEN / TELEGRAM_ADMIN_IDS not found in .env")
 except Exception as e:
     print("NOT SENT:", e)
+sys.exit(0 if _sent else 1)

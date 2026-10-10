@@ -69,14 +69,6 @@ LAYER1_DAYS = 30
 LAYER2_DAYS = {"1H": 10, "4H": 30}
 STALE_DAYS = {"1H": 5, "4H": 20}
 UP_STATES = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")
-# B14 item 1.3 (Desire 8 Oct): the engine's memory is stamped with the rules it was built under. A different stamp
-# (a code change below, or a change to this market's settings) rebuilds the memory from history on the next look.
-RULES_V = "B14"
-# B14 (Desire 7-9 Oct): the new entry and exit rules. Off until phase_config.b14_rules_enabled is switched on after
-# the 16-month box test; with it off the engine trades exactly as B13. The knobs are for the box test only.
-B14_KNOBS = {"witness_h": 12, "ma_witness": True, "runner": True, "runner_dip": True, "turn": "sphere",
-             "strong": True, "release": "c", "rearm": True, "rearm_max": 5, "rearm_after_majority": True,
-             "pkg_majority": True, "sig_break": "b121", "channel_target": True, "room_r": 0.5, "tp_line_only": True}
 
 DEFAULT_MARKETS = {
     "GOLD":   dict(entry="B", target_atr=4.0, exit="FIXED", cont_only=False, no_spike=False),
@@ -84,9 +76,7 @@ DEFAULT_MARKETS = {
     "USTEC":  dict(entry="B", target_atr=4.0, exit="FIXED", cont_only=False, no_spike=False),
     "EURUSD": dict(entry="E", target_atr=2.5, exit="FIXED", cont_only=True, no_spike=True),
     "GBPAUD": dict(entry="E", target_atr=2.5, exit="FIXED", cont_only=True, no_spike=True),
-    # B14 item 6.1 (Desire 9 Oct): BTC aims for 4 hourly moves with a fixed exit, like the others -- the built-in
-    # default now agrees with the switch-on config (config.json decides while BTC's block is there)
-    "BTC":    dict(entry="E", target_atr=4.0, exit="FIXED", cont_only=False, no_spike=False),
+    "BTC":    dict(entry="E2", target_atr=None, exit="RUNNER", cont_only=False, no_spike=False),   # B12 (decision 9)
     # B12 new markets (decisions 2, 3, 5, 7) -- the profiles that qualified in Test 6
     "JP225":  dict(entry="B", target_atr=4.0, exit="FIXED", cont_only=False, no_spike=False),
     "EURJPY": dict(entry="B", target_atr=4.0, exit="FIXED", cont_only=False, no_spike=False),
@@ -117,22 +107,7 @@ def market_settings(asset, pcfg=None):
     # B12.1 (Desire 30 Sep, decisions 50 A and 54): which reversals may live -- "none" | "brain4" (the turning point on
     # a 4H brain level) | "vote2" (BTC: at least 2 of -- 4H brain level / held before / yesterday's low (buy) or high (sell))
     cfg["reversal_rule"] = str(cfg.get("reversal_rule") or ("brain4" if cfg["reversal_at_4h_brain"] else "none"))
-    # B14: the master switch (phase_config.b14_rules_enabled), a market's own "b14" key wins; the box-test knobs
-    _pc = pcfg or {}
-    cfg["b14"] = bool(over.get("b14", _pc.get("b14_rules_enabled", False)))
-    cfg["b14_knobs"] = dict(B14_KNOBS, **(_pc.get("b14_knobs") or {}))
-    cfg["builtin"] = not bool(over)          # B14 item 7.8: True = no config block, the code's built-in settings
     return cfg
-
-
-def rules_stamp(cfg, variant=None):
-    """B14 item 1.3: what the engine's memory was built under -- the code's rules version plus every setting of this
-    market. Any difference rebuilds the memory. A practice-only exploration engine (variant) never uses the B14
-    rules, so the B14 switch and its knobs are left out of its stamp."""
-    import json as _json
-    keep = {k: v for k, v in (cfg or {}).items()
-            if k != "builtin" and not (variant and k in ("b14", "b14_knobs"))}
-    return "%s|%s|%s" % (RULES_V, variant or "-", _json.dumps(keep, sort_keys=True, default=str))
 
 
 # ---- shared building blocks -------------------------------------------------------------
@@ -350,7 +325,7 @@ class NSEngine:
                 "setups": [], "seen": [], "next_id": 1, "levels2": {}}
 
     # -- public ---------------------------------------------------------------------------
-    def update(self, st, df1, df4, pcfg=None, cs=None, now=None, mp=None):
+    def update(self, st, df1, df4, pcfg=None, cs=None, now=None):
         out = {"state": st, "proofs": [], "head": None, "ladder": [], "setups": [], "brains": {},
                "processed": 0, "missed": []}
         cfg = market_settings(self.asset, pcfg)
@@ -360,13 +335,9 @@ class NSEngine:
         self._cs_now = cs                       # display only: the brains at the moment of a proof
         if not isinstance(st, dict) or st.get("v") != 1:
             st = self.new_state()
-        if cfg is not None:
-            st = self._rules_check(st, cfg)          # B14 item 1.3: rebuild the memory after a rules change
         out["state"] = st
         if cfg is None or df1 is None or len(df1) < 30:
             return out
-        self._map = mp if mp is not None else (_line_map_latest(self.asset) if cfg.get("b14") else None)   # B14
-        self._nomap_n = 0                         # B14: signals judged without a map in this look (said once, below)
         df4 = hourly_to_4h(df1)                 # B12 (decision 35 A): never MT5's own, possibly stale, H4 series
         if len(df4) < 2 * K + 2:
             return out
@@ -469,39 +440,6 @@ class NSEngine:
         out["brains"] = self._brains(cs, float(c1[-1]), float(a1[-1]) if a1[-1] == a1[-1] else None,
                                      float(a4[-1]) if a4[-1] == a4[-1] else None)
         return out
-
-    # B14 item 1.3 (Desire 8 Oct): at the B13 restart every market kept memory built by the old rules ("caught up 0
-    # candle(s)"), so GOLD's retired setup stayed dead. The memory now carries the stamp of the rules it was built
-    # under; a different stamp starts it again from history (REPLAY_DAYS of candles; triggers found while catching up
-    # are logged, never traded). Kept: the 4H brain (rule-free), its level history, the package's records, its
-    # waiting entries and the chart's recent proofs.
-    _KEEP_ON_REBUILD = ("brain4_m", "brain4_t", "brain4_prev", "brain_hist", "levels2", "pkg", "pkg_ready",
-                        "proofs_hist")
-
-    def _rules_check(self, st, cfg):
-        stamp = rules_stamp(cfg, self.variant)
-        old = st.get("rules")
-        if old == stamp:
-            return st
-        if old is None and (st.get("last_1h") is None or self.variant is not None):
-            # a brand-new memory: nothing to rebuild. A practice-only exploration engine's rules are not changed by B14
-            # (it keeps 25 days and the B13 rules), so its memory is only stamped; a later settings change rebuilds it.
-            st["rules"] = stamp
-            return st
-        fresh = self.new_state()
-        for k in self._KEEP_ON_REBUILD:
-            if k in st:
-                fresh[k] = st[k]
-        fresh["next_id"] = max(int(st.get("next_id", 1) or 1), 1)
-        fresh["rules"] = stamp
-        fresh["rebuilt"] = str(pd.Timestamp.now(tz="UTC").tz_localize(None))
-        self._rebuilt_from = ("its memory is from before B14 (no rules stamp)" if old is None else
-                              "the rules or this market's settings changed since its memory was built")
-        self._log.warning("[NS-REBUILD] %s: %s -- rebuilding the memory from the last %d days of candles "
-                          "(triggers found while catching up are logged, never traded)",
-                          self.asset, self._rebuilt_from, REPLAY_DAYS)
-        self._first_call = True                          # so the catch-up count is logged ([DEPLOY-HYGIENE])
-        return fresh
 
     @staticmethod
     def _revised(st, t1, hi1, lo1, c1):
@@ -630,11 +568,6 @@ class NSEngine:
                     "top" if d == 1 else "bottom", band)
             notes.append("quality line: %s" % " + ".join(x for x, y in (("held before", held), ("4H brain level", onb)) if y))
         rule = cfg.get("reversal_rule", "none")
-        if cfg.get("b14") and self.variant is None:     # the practice-only exploration engines keep the B13 check
-            # B14 Q6 A / Q7 A (Desire 9 Oct): a reversal is no longer thrown away at birth. Its turning point is judged
-            # at the signal on the line map (inside the sphere of a major line or an average), and a reversal that
-            # fails goes to the package instead. BTC uses the same rule (its 2-of-3 check goes).
-            rule = "none"
         if kind == "reversal" and rule in ("brain4", "vote2"):
             c1_ = any(abs(v - r1) <= band for v in brain)                                  # on a 4H brain level
             if rule == "brain4":
@@ -734,17 +667,7 @@ class NSEngine:
                 # counts now; a SMALL one counts only if the NEXT 4H candle closes further past. Live engine only --
                 # the practice-lane ideas keep their tested rule. (Replaces the 29 Sep clear-break margin.)
                 a4b = atr4_at.get(t) or s.get("atr4") or 0.0
-                _kn14 = cfg.get("b14_knobs") if (cfg.get("b14") and self.variant is None) else None
-                if _kn14 and _kn14.get("sig_break") == "mark" and getattr(self, "_map", None) is not None:
-                    # box test only (4.5 / 9.1): the signal line breaks at the 3/4 mark too -- a quarter of a 4H move
-                    # past a major 4H line, an eighth past any other
-                    from src.execution import line_map as LM
-                    _big_l = self._map.is_major_4h(d, r2, s["conf"], t)
-                    _mk = (LM.SPH_BIG if _big_l else LM.SPH_SMALL) * LM.BREAK_FRAC * a4b
-                    broke = a4b > 0 and d * (rb - r2) >= _mk
-                    how = "BREAK (past the 3/4 mark)" if broke else "no (not past the 3/4 mark)"
-                    s["break_kind"] = "3/4 mark" if broke else None
-                elif _conf1h:
+                if _conf1h:
                     pass                                             # confirmed on the 1H candle above
                 elif _h1:
                     if s.pop("pend1h", None) is not None and emit:   # a small break never got its next 1H candle (data gap)
@@ -819,43 +742,6 @@ class NSEngine:
                         self._log.info("[COUNT-2] %s NS dir=%+d RETEST low/high=%.5g edge=%.5g peak=%.5g",
                                     self.asset, d, lo1[i] if d == 1 else hi1[i], s["edge"], s["h2"])
                     continue
-                _kn14 = cfg.get("b14_knobs") if (cfg.get("b14") and self.variant is None and cfg["entry"] == "E"
-                                                  and bool(cfg.get("package"))) else None
-                if _kn14 and _kn14.get("runner") and getattr(self, "_map", None) is not None:
-                    # B14 item 5.7 (Desire 8-9 Oct): the RUNNER entry -- price broke out and ran without a retest:
-                    # 3 higher 1H closes (one dip of any size may sit between them; the run ends on a higher close),
-                    # every candle clear of the line (a low within 1 move of it is a retest: the normal entry takes
-                    # over above). Then the normal trigger: a 1H close past the best close so far. It needs a witness
-                    # that broke the same way in the last 12 hours AND was retested -- the witness supplies the retest.
-                    # With no witness the setup keeps waiting for a normal retest.
-                    if s.get("run_ok") and d * (c - s["h2"]) > 0:
-                        _w = self._map.witnesses(d, t, hours=float(_kn14["witness_h"]), need_retest=True)
-                        if not _kn14.get("ma_witness", True):
-                            _w = [w for w in _w if w["kind"] == "diagonal"]
-                        if _w:
-                            strength = candle_strength(d, hi1[i], lo1[i], c1[i])
-                            self._candidate(st, cfg, s, "E", i, t, c, atr, strength, emit, out, runner_wits=_w)
-                            self._end(st, s, "NS_ENTERED", False, t)
-                            continue
-                        if emit:
-                            self._log.info("[RUNNER-WAIT] %s: dir=%+d R2=%.5g close=%.5g -- a run with no retest, but "
-                                           "no witness broke and was retested in the last %gh -- waiting for a normal "
-                                           "retest", self.asset, d, r2, c, float(_kn14["witness_h"]))
-                    rn = s.setdefault("rn", {"last": None, "n": 0, "dip": False})
-                    if rn["last"] is None or d * (c - rn["last"]) > 0:
-                        rn["last"], rn["n"] = c, rn["n"] + 1
-                    elif _kn14.get("runner_dip", True) and not rn["dip"] and rn["n"] < 3:
-                        rn["dip"] = True                    # the one dip allowed between the three closes
-                    elif rn["n"] < 3:
-                        s["rn"] = {"last": c, "n": 1, "dip": False}     # a second dip: the run starts again here
-                        rn = s["rn"]
-                    if rn["n"] >= 3 and d * (c - rn["last"]) >= 0 and not s.get("run_ok"):
-                        s["run_ok"] = True
-                        if emit:
-                            self._log.info("[RUNNER-RUN] %s: dir=%+d R2=%.5g -- 3 1H closes running the trade's way "
-                                           "(%s each time) with no retest (last %.5g) -- a 1H close past the best close "
-                                           "takes it, with a witness", self.asset, d, r2,
-                                           "higher" if d == 1 else "lower", c)
                 if d * (c - s["h2"]) > 0:
                     s["h2"] = c
                     s["h2_t"] = t                   # display only
@@ -876,12 +762,11 @@ class NSEngine:
             self._log.info("[KILL-R1] %s NS close4=%.5g -> %d setup(s) dead (%s)", self.asset, r4, len(killed),
                         ", ".join(killed))
 
-    def _candidate(self, st, cfg, s, style, i, t, e, atr, strength, emit, out, runner_wits=None):
+    def _candidate(self, st, cfg, s, style, i, t, e, atr, strength, emit, out):
         d, r2 = s["d"], s["r2"]
         why = None
         if cfg["entry"] != style:
             return
-        label = "RUNNER" if runner_wits else None     # B14 item 5.7: a run without a retest, taken with a witness
         too_far = d * (e - r2) / atr > FRESH_ATR
         if too_far:
             why = "too far from R2 (%.2f moves)" % (d * (e - r2) / atr)
@@ -898,25 +783,7 @@ class NSEngine:
         # engine calls too far, is handed over instead of traded or retired. Everything else is unchanged.
         pkg_route = None
         diag_agrees, diag_t = self._diag_recent(d, t)           # B13 items 31-32 (Desire 6 Oct)
-        b14 = None
-        _b14_on = self.variant is None and style == "E" and bool(cfg.get("package")) and bool(cfg.get("b14"))
-        if _b14_on and getattr(self, "_map", None) is None:
-            _b14_on = False                                      # rule 13: never silent -- said once per look
-            self._nomap_n = getattr(self, "_nomap_n", 0) + 1
-            if self._nomap_n == 1:
-                self._log.warning("[NS-MAP] %s: no line map -- the B14 checks can't run; signals in this look follow "
-                                  "the B13 rules (see the [MAP] lines)", self.asset)
-        if _b14_on and not f_cont and not f_spike:
-            # B14 section 5 (Desire 8-9 Oct): every reason to wait is collected from the one line map; any reason to
-            # wait wins (Q1 A) and the signal goes to the package. Otherwise it is taken at once.
-            b14 = self._b14_route(cfg, s, t, e, atr, stop, target, runner_wits)
-            if too_far:
-                pkg_route, why = "far", None
-            elif why is None and b14["wait"]:
-                pkg_route = "wait"
-            if why is None and not too_far:
-                target = b14["target"]
-        elif self.variant is None and style == "E" and bool(cfg.get("package")) and not f_cont and not f_spike:
+        if self.variant is None and style == "E" and bool(cfg.get("package")) and not f_cont and not f_spike:
             if too_far:
                 pkg_route, why = "far", None
             elif why is None:
@@ -935,7 +802,7 @@ class NSEngine:
                     self._log.info("[PKG-ROUTE] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- taken at once (space to run)",
                                    self.asset, style, d, r2, e,
                                    ("nearest old 4H %s %.5g is %.2f 4H moves ahead" % ("high" if d == 1 else "low", _lvl, _dist))
-                                   if _lvl is not None else self._ahead_days_text(t))   # B14 item 1.2b
+                                   if _lvl is not None else "no old 4H high/low ahead in the last %d days" % PKG_AHEAD_DAYS)
         room = None
         if self.variant is None and (cfg.get("quality_lines") or cfg.get("room_required")):
             room = self._room_ok(st, cfg, d, e, t, atr)          # B12.1 (decision 48): room ahead of the entry?
@@ -989,25 +856,6 @@ class NSEngine:
             fields["ns_room"] = bool(room)
             (fields["ns_aplus"] if room else fields["ns_watch"]).append("room ahead" if room else "no room ahead")
         fields["ns_explore"] = self.variant
-        if b14 is not None:
-            # B14: what the line map said (the card, the weekly trace) and the switch the trade manager reads for the
-            # lock and the staircase (section 6)
-            from src.execution import line_map as LM
-            _wb = self._map.walls_between(b14["b"], d, e, target) if target is not None else \
-                self._map.walls_between(b14["b"], d, e, None, reach=4.0)
-            fields.update({
-                "ns_b14": True, "ns_b14_exits": True, "ns_label": label,
-                "ns_wait": list(b14["wait"]), "ns_notes": list(b14["notes"]),
-                "ns_route": "; ".join(b14["notes"]) or "space to run",
-                "ns_witness": ("%s broke %s" % (b14["wits"][0]["name"], str(b14["wits"][0]["t_break"])))
-                if b14["wits"] else None,
-                "ns_target_kind": b14["target_kind"], "ns_wild": b14["wild"],
-                "ns_walls": [{"near": B["near"], "s_near": B["s_near"], "s_far": B["s_far"], "label": B["label"]}
-                             for B in _wb[:4]],
-                "ns_lock_at": LM.lock_level(_wb, d, e),
-            })
-            if label:
-                fields["ns_aplus"].append("RUNNER entry (%s)" % fields["ns_witness"])
         if kind == "MR_REV":
             fields.update({"setup_active_mr": True, "setup_kind_mr": kind, "setup_dir_mr": d,
                            "setup_age_mr": fields["setup_age"], "setup_ref_mr": float(r2),
@@ -1020,37 +868,20 @@ class NSEngine:
             if pkg_route == "far":
                 return
             pkg_route = None
-        _tier_log = "RUNNER" if label else tier            # B14 item 5.7: the "RUNNER" label in every market
         if pkg_route is not None:
             _lvl, _edg, _dist = self._bigger_ahead(d, e, t)
             rec = {"id": int(s["id"]), "asset": self.asset, "d": int(d), "kind": kind, "route": pkg_route,
                    "r2": float(r2), "r1": float(s["r1"]), "edge": float(s["edge"]), "trig": float(peak),
-                   # (a RUNNER entry has no retest: its push is measured from the break)
-                   "t_touch": str(s.get("t_touch") if s.get("t_touch") is not None else s.get("t_break")),
-                   "tE": str(t), "eE": float(e), "atrE": float(atr),
+                   "t_touch": str(s.get("t_touch")), "tE": str(t), "eE": float(e), "atrE": float(atr),
                    "big": (float(_lvl) if _lvl is not None else None), "big_dist": (float(_dist) if _dist is not None else None),
                    "status": "watching", "last_t": None, "maj": None, "announced": False, "fields": fields}
-            if b14 is not None:
-                # B14: everything the package needs to judge the release (5.1 option c, the old line, the channel room)
-                # and to re-arm the setup after a cancel (5.10 option A)
-                _far = ["%.2f moves past the line (too far to take at once)" % (d * (e - r2) / atr)] if pkg_route == "far" else []
-                rec.update({"b14": True, "why": _far + list(b14["wait"]), "label": label,
-                            "walls": [{"near": B["near"], "far": B["far"], "s_near": B["s_near"], "mark": B["mark"],
-                                       "label": B["label"]} for B in b14["walls"]],
-                            "setup": copy.deepcopy(s),     # with its own types: a re-armed setup goes straight back
-                            "rearm_n": int(s.get("rearms", 0) or 0)})
             st.setdefault("pkg", []).append(rec)
             self._log.info("[PKG-HANDOVER] %s: %s dir=%+d R2=%.5g entry=%.5g -- %s -- the package takes over",
-                           self.asset, _tier_log, d, r2, e,
-                           "; ".join(rec["why"]) if rec.get("b14") else
+                           self.asset, tier, d, r2, e,
                            ("old 4H %s %.5g just ahead (%.2f 4H moves)" % ("high" if d == 1 else "low", _lvl, _dist))
                            if pkg_route == "near"
                            else "%.2f moves past the line (too far to take at once)" % (d * (e - r2) / atr))
             return
-        if b14 is not None and emit:
-            self._log.info("[NS-ROUTE] %s: %s dir=%+d R2=%.5g entry=%.5g -- taken at once: %s | target %s (%s)",
-                           self.asset, _tier_log, d, r2, e, "; ".join(b14["notes"]) or "space to run",
-                           ("%.5g" % target) if target is not None else "none", b14["target_kind"])
         _hist = st.setdefault("proofs_hist", [])                   # display only: the chart's recent proofs
         _hist.append(dict(proof, missed=not emit))
         if len(_hist) > 30:
@@ -1062,117 +893,12 @@ class NSEngine:
         elif emit:
             out["proofs"].append(proof)
             self._log.info("[NS-PROOF] %s: %s %s dir=%+d R2=%.5g entry=%.5g stop=%.5g target=%s exit=%s (%s, %s)",
-                        self.asset, _tier_log, kind, d, r2, e, stop,
+                        self.asset, tier, kind, d, r2, e, stop,
                         ("%.5g" % target) if target else "none (runner)", cfg["exit"], s["kind"], str(t))
         else:
             out["missed"].append(proof)
             self._log.info("[NS-MISSED] %s: %s dir=%+d R2=%.5g at %s -- found while catching up, not traded",
                         self.asset, tier, d, r2, str(t))
-
-    def _ahead_days_text(self, t):
-        """B14 item 1.2b (Desire 8 Oct): the line used to say "in the last 60 days" when the engine only had 25 days
-        of candles. It now says how many days were really searched."""
-        t1 = getattr(self, "_lab", (None,))[0]
-        have = (pd.Timestamp(t) - pd.Timestamp(t1[0])).total_seconds() / 86400.0 if t1 is not None and len(t1) else 0.0
-        if have >= PKG_AHEAD_DAYS:
-            return "no old 4H high/low ahead in the last %d days" % PKG_AHEAD_DAYS
-        return "no old 4H high/low ahead in the %.0f days of candles on hand (%d wanted)" % (have, PKG_AHEAD_DAYS)
-
-    def _b14_route(self, cfg, s, t, e, atr, stop, target, runner_wits=None):
-        """B14 section 5 (Desire 8-9 Oct): read the one line map at the signal and list every reason to wait.
-          - a big wall within half a 4H move ahead, unless the signal is STRONG (2 of the 3 kinds of line broke the
-            same way and all are big -- a big horizontal with a big diagonal or a big average -- or all 3 kinds broke);
-          - a reversal whose turning point is not inside the sphere of a major line or an average (Q6 A; BTC too, Q7 A);
-          - an old 4H high/low within half a move ahead and no witness (with a witness: the fast lane);
-          - a wild market (the 4H move at least 1.5x its 60-day average) and no witness;
-          - inside a channel, the other side comes before the normal target with less than 0.5R of room.
-        A witness = a diagonal or average that broke the same way (a 4H close past its 3/4 mark) in the 12 hours before
-        the signal and has had no 1H close back across since. -> dict(wait, notes, wits, walls, strong, target, ...)"""
-        from src.execution import line_map as LM
-        mp, kn, d = self._map, cfg["b14_knobs"], s["d"]
-        b = mp.bucket(t)
-        a4 = mp.a4_at(b)
-        wits = list(runner_wits) if runner_wits else mp.witnesses(d, t, hours=float(kn["witness_h"]))
-        if not kn.get("ma_witness", True):                       # box test only: diagonal witnesses only
-            wits = [w for w in wits if w["kind"] == "diagonal"]
-        walls = mp.walls_ahead(b, d, e, LM.WALL_REACH) if a4 == a4 and a4 > 0 else []
-        wait, notes, strong = [], [], None
-        if walls:
-            strong, why_s = LM.strong_through_walls(mp, b, d, s["r2"], s["conf"], t, wits)
-            if not kn.get("strong", True):                       # box test only: every big wall goes to the package
-                strong, why_s = False, "strong buys switched off (box test)"
-            W = walls[0]
-            txt = "%s %.5g, %.2f 4H moves ahead" % (W["label"], W["near"], d * (W["near"] - e) / a4)
-            if strong:
-                notes.append("strong through the wall (%s; wall: %s)" % (why_s, txt))
-            else:
-                wait.append("big wall ahead (%s) and not strong: %s" % (txt, why_s))
-        if s["kind"] == "reversal":
-            if kn.get("turn") == "half1h":                      # box test: the tested half-hourly-move reading
-                ok_t, nm = self._turn_half1h(mp, d, s["r1"], s["conf"])
-            else:
-                ok_t, nm = mp.turn_at(d, s["r1"], s["conf"])
-            if ok_t:
-                notes.append("reversal turned at a %s" % nm)
-            else:
-                wait.append("a reversal whose turning point %.5g is not inside the sphere of a major line or an "
-                            "average" % s["r1"])
-        _lvl, _edg, _dist = self._bigger_ahead(d, e, t)
-        if _lvl is not None and _dist <= PKG_NEAR:
-            _o = "old 4H %s %.5g, %.2f 4H moves ahead" % ("high" if d == 1 else "low", _lvl, _dist)
-            if wits:
-                notes.append("fast lane: %s, witness %s" % (_o, wits[0]["name"]))
-            else:
-                wait.append("%s, and no witness" % _o)
-        wild, ratio = mp.wild(t)
-        if wild:
-            if wits:
-                notes.append("wild market (4H move %.1fx its 60-day average), witness %s" % (ratio, wits[0]["name"]))
-            else:
-                wait.append("wild market (4H move %.1fx its 60-day average) and no witness" % ratio)
-        tgt, tgt_kind = target, "normal"
-        if target is not None and stop is not None and a4 == a4 and a4 > 0:
-            if kn.get("channel_target", True):
-                lvl_c, ch = mp.channel_target(b, d, e)
-                if lvl_c is not None and d * (lvl_c - target) < 0:      # the channel's other side comes first
-                    room = d * (lvl_c - e) / max(abs(e - stop), 1e-12)
-                    if room < float(kn.get("room_r", 0.5)):
-                        wait.append("the %s's other side (%.5g) is only %.2fR away -- needs %.1fR of room" % (
-                            ch["kind"], lvl_c, max(room, 0.0), float(kn.get("room_r", 0.5))))
-                    else:
-                        tgt, tgt_kind = lvl_c, "the %s's other side (near edge of its sphere)" % ch["kind"]
-            if not kn.get("tp_line_only", True) and tgt_kind == "normal":
-                # box test only: take profit at the near edge of a big line's sphere that holds the normal target
-                for B in mp.walls_between(b, d, e, target):
-                    if d * (target - B["s_near"]) >= 0 and d * (target - B["mark"]) < 0:
-                        tgt, tgt_kind = B["s_near"], "near edge of the %s's sphere" % B["label"]
-                        break
-        return dict(wait=wait, notes=notes, wits=wits, walls=walls, strong=strong, target=tgt, target_kind=tgt_kind,
-                    wild=ratio, b=b, a4=a4)
-
-    @staticmethod
-    def _turn_half1h(mp, d, r1, conf):
-        """Box test only (9.1 row "turning points"): the tested reading -- the turning point within half an hourly
-        move of a major line or an average."""
-        b = mp.bucket(conf)
-        if b < 0:
-            return False, ""
-        m = mp.members(b)
-        j = int(np.searchsorted(mp.t1.values, np.datetime64(pd.Timestamp(conf)), side="right")) - 1
-        a1 = atr14(mp.hi1[max(0, j - 30):j + 1], mp.lo1[max(0, j - 30):j + 1], mp.c1[max(0, j - 30):j + 1])[-1] \
-            if j >= 14 else float("nan")
-        if not (a1 == a1 and a1 > 0):
-            return False, ""
-        own = 1 if d == 1 else 0                      # H4L / H4H codes in line_map
-        for k in range(len(m["lv"])):
-            cd = int(m["code"][k])
-            if abs(m["lv"][k] - r1) > 0.5 * a1 or (cd == own and abs(m["lv"][k] - r1) <= 1e-9 * max(1.0, abs(r1))):
-                continue
-            if cd in (16, 17):
-                continue
-            if m["big"][k] or m["maj"][k] or 6 <= cd <= 11:
-                return True, "line within half an hourly move"
-        return False, ""
 
     def _bigger_ahead(self, d, e, t):
         """B13 (Desire 2 Oct): the nearest bigger 4H line ahead of price -- a 4H swing close from the last
@@ -1418,16 +1144,6 @@ def _yday_hl_near(t1, hi1, lo1, conf, x, band):
         return None
     sel = days == days[m].max()
     return bool(abs(x - float(hi1[sel].max())) <= band or abs(x - float(lo1[sel].min())) <= band)
-
-
-def _line_map_latest(asset):
-    """B14: the market's newest line map (built once per look by the builder; see line_map.build_live)."""
-    try:
-        from src.execution import line_map as _lm
-        return _lm.latest(asset)
-    except Exception as _e:
-        logger.warning("[NS-MAP] %s: line map unavailable: %s", asset, _e)
-        return None
 
 
 def _cs_get(cs, name):

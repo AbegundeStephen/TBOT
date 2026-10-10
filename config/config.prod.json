@@ -53,7 +53,8 @@
     "max_total_open_risk": 0.25,
     "small_account_threshold_usd": 400,
     "small_account_max_exposure_pct": 10.0,
-    "max_total_open_positions": 10
+    "max_total_open_positions": 10,
+    "profit_lock_enabled": false
   },
   "_comment_short_portfolio": "=== SHORT POSITION PORTFOLIO RULES ===",
   "short_position_sizing": {
@@ -1888,7 +1889,10 @@
       20,
       25,
       30
-    ]
+    ],
+    "look_on_candle_close": true,
+    "look_delay_seconds": 30,
+    "practice_tick_seconds": 5
   },
   "risk_management": {
     "max_daily_trades": 30,
@@ -1904,7 +1908,8 @@
     "daily_profit_lock": {
       "soft_lock_pct": 0.1,
       "hard_lock_pct": 0.2
-    }
+    },
+    "daily_loss_brakes_enabled": false
   },
   "backtesting": {
     "initial_capital": 10000,
@@ -2320,7 +2325,9 @@
         ]
       }
     },
-    "council_suspended": true
+    "council_suspended": true,
+    "b14_rules_enabled": false,
+    "ns_engine_days": 75
   },
   "btc_volume_source": "binance"
 }

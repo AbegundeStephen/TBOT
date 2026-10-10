@@ -95,14 +95,17 @@
       "type": "cadence",
       "tag": "[REF-TIER]",
       "min": 1,
-      "window_min": 1440
+      "window_min": 1440,
+      "enabled": false,
+      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
     },
     {
       "id": "r1origin.on_birth",
       "type": "cadence",
       "tag": "[R1-ORIGIN]",
       "min": 1,
-      "window_min": 1440
+      "window_min": 1440,
+      "when": "market_open"
     },
     {
       "id": "count1.check",
@@ -165,10 +168,11 @@
       "type": "cadence",
       "tag": "[COUNCIL-ENTRY]",
       "min": 1,
-      "window_min": 15,
+      "window_min": 35,
       "per_asset": true,
       "when": "market_open",
-      "note": "B7-19: was [NO-PROOF], which an asset with a live proof never prints -- false FAILs on every asset with proofs"
+      "note": "B7-19: was [NO-PROOF], which an asset with a live proof never prints -- false FAILs on every asset with proofs",
+      "b14_note": "B14 3.6 (Desire 8 Oct): the look comes every 30 minutes"
     },
     {
       "id": "brc.confirmed_fields",
@@ -236,8 +240,9 @@
       "type": "cadence",
       "tag": "[PERSIST] .*: saved .* stores",
       "min": 1,
-      "window_min": 10,
-      "note": "B4 W6 -- old tag '[PERSIST] .* saved' also matched the STAGED-restore line ('staged saved stores, pending bar-count confirmation'), so the promise could clear itself falsely on the exact failure it exists to catch. Verified against every [PERSIST] line in composite_state_builder.py: only the real save line ('%s: saved %d stores') contains the literal ': saved ' immediately followed later by ' stores' -- the staged-restore, no-saved-stores, refused-restore and restored-success lines all fail at least one of those two literal fragments."
+      "window_min": 35,
+      "note": "B4 W6 -- old tag '[PERSIST] .* saved' also matched the STAGED-restore line ('staged saved stores, pending bar-count confirmation'), so the promise could clear itself falsely on the exact failure it exists to catch. Verified against every [PERSIST] line in composite_state_builder.py: only the real save line ('%s: saved %d stores') contains the literal ': saved ' immediately followed later by ' stores' -- the staged-restore, no-saved-stores, refused-restore and restored-success lines all fail at least one of those two literal fragments.",
+      "b14_note": "B14 3.6 (Desire 8 Oct): the look comes every 30 minutes"
     },
     {
       "id": "persist.restored",
@@ -397,8 +402,9 @@
       "tag": "[PERSIST] .* restored",
       "extract": "bars passed=",
       "window_min": 1440,
-      "enabled": true,
-      "note": "B8-2: on -- every restore says how many candles it missed"
+      "enabled": false,
+      "note": "B8-2: on -- every restore says how many candles it missed",
+      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
     },
     {
       "id": "instanceB.alive",
@@ -416,7 +422,11 @@
       "tag": "Signal BLOCKED by",
       "window_min": 1440,
       "enabled": true,
-      "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all."
+      "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all.",
+      "skip_gates": [
+        "ny_open"
+      ],
+      "skip_why": "B14 (Desire 8 Oct): ny_open logs a block on cycles with no signal, so no practice row can exist"
     },
     {
       "id": "b6.proof_council_cap",
@@ -698,8 +708,9 @@
       "type": "file_fresh",
       "file": "logs/p1_refusals/p1_*.jsonl",
       "window_min": 1440,
-      "enabled": true,
-      "note": "B8-7 -- every break check is recorded; BTC trades daily so the file is always fresh"
+      "enabled": false,
+      "note": "B8-7 -- every break check is recorded; BTC trades daily so the file is always fresh",
+      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
     },
     {
       "id": "b8.zero_pass_mark",
@@ -715,16 +726,18 @@
       "type": "file_fresh",
       "file": "logs/replayer_arms_*.json",
       "window_min": 11520,
-      "enabled": true,
-      "note": "B8-9: threshold met 22 Sep; the weekly run writes the arms files; 8-day window so a weekly run never looks late"
+      "enabled": false,
+      "note": "B8-9: threshold met 22 Sep; the weekly run writes the arms files; 8-day window so a weekly run never looks late",
+      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
     },
     {
       "id": "rl1.proposals_file",
       "type": "file_fresh",
       "file": "logs/rl1_proposals.jsonl",
       "window_min": 11520,
-      "enabled": true,
-      "note": "B8-9: the bandit stamps every run, so this proves it ran"
+      "enabled": false,
+      "note": "B8-9: the bandit stamps every run, so this proves it ran",
+      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
     },
     {
       "id": "ns.alive",
@@ -743,6 +756,258 @@
       "window_min": 1440,
       "enabled": true,
       "note": "B11-NS: any engine error is loud"
+    },
+    {
+      "id": "b13.freshness_refused",
+      "type": "cadence",
+      "tag": "[FRESHNESS] .* refused before sending",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B13 item 25: package entries are exempt -- any send-time refusal is unexpected",
+      "enabled": true
+    },
+    {
+      "id": "b13.pkg_decides",
+      "type": "follows",
+      "trigger": "-- the package takes over",
+      "tag": "[PKG-.* (signal",
+      "within_min": 1500,
+      "window_min": 2880,
+      "per_asset": true,
+      "why": "B13 item 25: every package hand-over must end in ENTER or CANCEL within ~25 h",
+      "enabled": true
+    },
+    {
+      "id": "b13.tg_direct_ok",
+      "type": "cadence",
+      "tag": "[TELEGRAM] direct send failed",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B13 item 25: the direct Telegram (stops, health, breakers, MT5) must get through",
+      "enabled": true
+    },
+    {
+      "id": "b13.pkg_notice_ok",
+      "type": "cadence",
+      "tag": "[PKG] .* Telegram notice failed",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B13 item 25: package notices must reach Telegram",
+      "enabled": true
+    },
+    {
+      "id": "b121.ns_data",
+      "type": "cadence",
+      "tag": "[NS-DATA] .* changed after it was used",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B12.1: a candle the engine used changed afterwards",
+      "enabled": true
+    },
+    {
+      "id": "b121.labels",
+      "type": "cadence",
+      "tag": "[NS-LABELS] .* label check failed",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B12.1: the proof labels failed",
+      "enabled": true
+    },
+    {
+      "id": "b121.card",
+      "type": "cadence",
+      "tag": "[NS-CARD] .* not",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B12.1: the proof card was not drawn / written / sent",
+      "enabled": true
+    },
+    {
+      "id": "b121.chart",
+      "type": "cadence",
+      "tag": "[NS-CHART] .* not written",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B12.1: the interactive chart was not written",
+      "enabled": true
+    },
+    {
+      "id": "b121.advisory",
+      "type": "cadence",
+      "tag": "[COUNCIL-ADVISORY] .* failed",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B12: the council-advisory step failed",
+      "enabled": true
+    },
+    {
+      "id": "b121.pause_file",
+      "type": "cadence",
+      "tag": "[NS-PAUSE] .* failed",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B11-NS: the per-market pause file could not be read or saved",
+      "enabled": true
+    },
+    {
+      "id": "b13.combined",
+      "type": "cadence",
+      "tag": "[COMBINED-CHART] .* not",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B13 item 9: the combined chart was not drawn / sent",
+      "enabled": true
+    },
+    {
+      "id": "b14.pkg_outcome",
+      "type": "follows",
+      "trigger": "[PKG-ENTER]",
+      "tag": "[PKG-OUTCOME]",
+      "within_min": 10,
+      "window_min": 240,
+      "per_asset": true,
+      "why": "B14 1.1c: every package entry ends in an order or a stated refusal within 10 minutes",
+      "enabled": true
+    },
+    {
+      "id": "b14.pkg_expired",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[PKG-OUTCOME] .* EXPIRED",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 1.1a: a package entry no trading look reached before the next 30m close",
+      "enabled": true
+    },
+    {
+      "id": "b14.weekly_report",
+      "type": "file_fresh",
+      "file": "logs/rl1_weekly_*.txt",
+      "window_min": 11520,
+      "why": "B14 7.7: the Saturday job must write its report every week (8-day window)",
+      "enabled": true
+    },
+    {
+      "id": "b14.look_runs",
+      "type": "cadence",
+      "tag": "[CYCLE]",
+      "min": 1,
+      "window_min": 35,
+      "why": "B14 3.1: a look at every 30-minute close (the [CYCLE] line each look writes; also true on the old timer)",
+      "enabled": true
+    },
+    {
+      "id": "b14.look_late",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[LOOK] .* late",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 3.1: a look that starts more than 5 minutes late",
+      "enabled": true
+    },
+    {
+      "id": "b14.map_built",
+      "type": "cadence",
+      "tag": "[MAP] .* built from",
+      "min": 1,
+      "window_min": 180,
+      "per_asset": true,
+      "when": "market_open",
+      "why": "B14 4.1: each market's line map is rebuilt after every 1H close",
+      "enabled": true
+    },
+    {
+      "id": "b14.map_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[MAP] .* not",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 4.1: a line map that could not be built or summarised",
+      "enabled": true
+    },
+    {
+      "id": "b14.ns_map_missing",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-MAP]",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14: a signal judged without its line map (the B13 rules were used instead)",
+      "enabled": true
+    },
+    {
+      "id": "b14.ns_history",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-DATA] .* the usual",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 1.2a: the engine's 75-day history could not be fetched",
+      "enabled": true
+    },
+    {
+      "id": "b14.walls_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-WALLS]",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 6.4-6.5: the lock / staircase check could not run",
+      "enabled": true
+    },
+    {
+      "id": "b14.stair_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-STAIR-FAIL]",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 6.5: a 1H close did not reach the staircase",
+      "enabled": true
+    },
+    {
+      "id": "b14.stop_hold_walls",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-STOP-HOLD] .* ns_wall",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 6.7: a lock or staircase move held back by the guard (it must reach MT5)",
+      "enabled": true
+    },
+    {
+      "id": "b14.telegram_cmds",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[TELEGRAM] queued commands not run",
+      "max": 0,
+      "window_min": 1440,
+      "why": "B14 (3.1 knock-on): Telegram close commands must run between looks",
+      "enabled": true
     }
-  ]
+  ],
+  "daily_break_utc": {
+    "GOLD": [
+      "21:50",
+      "23:15"
+    ],
+    "USTEC": [
+      "21:50",
+      "23:15"
+    ],
+    "USOIL": [
+      "21:50",
+      "23:15"
+    ],
+    "SILVER": [
+      "21:50",
+      "23:15"
+    ],
+    "JP225": [
+      "20:20",
+      "21:40"
+    ]
+  }
 }

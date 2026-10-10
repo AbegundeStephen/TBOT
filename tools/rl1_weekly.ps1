@@ -12,25 +12,31 @@ if (-not (Test-Path $py)) {
 }
 $env:PYTHONPATH = (Get-Location).Path
 $fail = 0
+$failed = @()       # B14 item 7.7 (Desire 8 Oct): the names of the steps that failed, for the Telegram at the end
 "=== RL-1 weekly run $stamp ===" | Out-File $out -Encoding utf8
 "`n--- refresh 15-minute price files ---" | Out-File $out -Append -Encoding utf8
 & $py tools\refresh_15m.py 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "refresh_15m" }
 # B12 (Desire 28 Sep, RL ruling C): RL-1's three knobs are off for new-engine trades -- its arms are no longer run.
 # B12 (decisions 36 A and 37 A): first repair the saved price files from MT5 (a backup is kept), then check them.
 "`n--- B12: repair the saved price files (decision 36) ---" | Out-File $out -Append -Encoding utf8
 & $py tools\data_repair.py 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "data_repair" }
 "`n--- B12: saved price files against MT5 (decision 37) ---" | Out-File $out -Append -Encoding utf8
 & $py tools\data_check.py 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "data_check" }
 "`n--- B12: forward test, paper ideas, proof supply, council vote, labels, exploration ---" | Out-File $out -Append -Encoding utf8
 & $py tools\all_tests.py --weekly 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "all_tests" }
 "`n--- B12: every label, yesterday's high/low, the paper market, the new markets ---" | Out-File $out -Append -Encoding utf8
 & $py tools\weekly_b12.py 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "weekly_b12" }
 "`n--- B10 D4: proofs versus random ---" | Out-File $out -Append -Encoding utf8
 & $py tools\weekly_report.py 2>&1 | Out-File $out -Append -Encoding utf8
-if ($LASTEXITCODE -ne 0) { $fail = 1 }
+if ($LASTEXITCODE -ne 0) { $fail = 1; $failed += "weekly_report" }
+# B14 item 7.7 (Desire 8 Oct): a failed Saturday run is no longer silent -- one Telegram naming the failed steps
+if ($fail -ne 0) {
+    "`n--- B14: Telegram about the failed steps ---" | Out-File $out -Append -Encoding utf8
+    & $py tools\b14_tg_send.py "TBOT SATURDAY JOB FAILED ($stamp): $($failed -join ', ') -- see logs\rl1_weekly_$stamp.txt on the box" 2>&1 | Out-File $out -Append -Encoding utf8
+}
 exit $fail

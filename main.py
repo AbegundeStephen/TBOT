@@ -201,6 +201,38 @@ def _load_gates_registry():
 _GATES_REGISTRY = _load_gates_registry()
 
 
+class _B14RefusalCapture(logging.Handler):
+    """B14 item 1.1c: during one trading look, remembers the last line (from the look's own thread) that says why a
+    signal was not traded, so a package entry's [PKG-OUTCOME] can quote it."""
+    import re as _re
+    _PAT = _re.compile(r"blocked|\[SUPPRESS\]|suppressed|refused|veto|halted|\[LIMIT\]|\[BREAKER\]|circuit|"
+                       r"PROOF-REUSED|OUTSCORED|FRESHNESS|not trading|paused|market closed|skipping|\[SKIP\]|"
+                       r"\[STARTUP\]|quarantine|warmup|entry window|insufficient|\[HOLD\]|rejected|NS-FINAL|ns: |"
+                       r"failed", _re.IGNORECASE)
+    # lines about the bot's own housekeeping, never the reason a trade was not sent
+    _NOT_REASONS = ("[MAP]", "[NS-DATA]", "[HEARTBEAT]", "[HISTORY]", "[PERSIST]", "[COMBINED-CHART]", "[NS-CARD]",
+                    "[NS-CHART]", "[TELEGRAM]")
+
+    def __init__(self, thread_id):
+        super().__init__(level=logging.INFO)
+        self._tid = thread_id
+        self._last = None
+
+    def emit(self, record):
+        try:
+            if record.thread != self._tid:
+                return
+            _m = record.getMessage()
+            if "[PKG-" in _m or _m.startswith(self._NOT_REASONS) or not self._PAT.search(_m):
+                return
+            self._last = _m[:300]
+        except Exception:
+            pass
+
+    def reason(self):
+        return self._last
+
+
 class TradingBot:
     """Main trading bot with  stability and error recovery"""
 
@@ -4474,6 +4506,168 @@ class TradingBot:
         reraise=False,
         default_return=None,
     )
+    # -- B14 item 3 (Desire 8 Oct): timing ---------------------------------------------------------------
+    def _b14_look_tick(self):
+        """B14 item 3.1: one look per 30-minute close (:00 and :30 UTC), look_delay_seconds (30) after it, so the
+        broker has finished the candle. 4H and 1H closes drive the signals; 30m closes drive the package."""
+        _now = datetime.now(timezone.utc)
+        _slot = _now.replace(minute=(_now.minute // 30) * 30, second=0, microsecond=0)
+        _delay = float(self.config["trading"].get("look_delay_seconds", 30))
+        if _now < _slot + timedelta(seconds=_delay) or getattr(self, "_b14_last_slot", None) == _slot:
+            return
+        self._b14_last_slot = _slot
+        _late = (_now - _slot).total_seconds() - _delay
+        if _late > 300:
+            logger.warning("[LOOK] the %s UTC look starts %.0f min late", _slot.strftime("%H:%M"), _late / 60.0)
+        logger.info("[LOOK] %s UTC close -- look starts", _slot.strftime("%Y-%m-%d %H:%M"))
+        self.run_trading_cycle()
+
+    def _b14_telegram_tick(self):
+        """B14 (knock-on of 3.1): Telegram's queued commands -- close one trade, close all -- used to run only inside
+        the look; with one look every 30 minutes they would wait that long. They now run within ~10 seconds, and the
+        snapshot Telegram reads (/status) is refreshed every minute."""
+        _dm = getattr(self, "data_manager_telegram", None)
+        if _dm is None:
+            return
+        try:
+            _now = time.time()
+            _queued = len(getattr(_dm, "_command_queue", None) or ())
+            if _queued or _now - getattr(self, "_b14_snap_t", 0.0) >= 60:
+                self._b14_snap_t = _now
+                _dm.update_snapshot(self)
+            if _queued:
+                _n = _dm.process_queued_commands(self)
+                logger.info("[TELEGRAM] %s queued command(s) run between looks", _n)
+        except Exception as _tg14:
+            logger.warning("[TELEGRAM] queued commands not run this tick: %s", _tg14)
+
+    def _b14_path_tick(self):
+        """B14 (knock-on of 3.1): path capture keeps its ~5-minute points (the replays of other exit rules read them)."""
+        try:
+            self._capture_open_position_paths()
+        except Exception as _pc14:
+            logger.warning(f"[PATH-CAPTURE] Skipped this tick: {_pc14}")
+
+    def _b14_practice_tick(self):
+        """B14 item 3.3 (Desire 8 Oct, option a): practice exits are checked every few seconds in the trade loop, like
+        live trades. With one look every 30 minutes the look alone would miss a quick wick through a practice stop.
+        (The look still checks them too.)"""
+        _st = getattr(self, "shadow_trader", None)
+        if _st is None:
+            return
+        _now = time.time()
+        if _now - getattr(self, "_b14_pt_last", 0.0) < float(self.config["trading"].get("practice_tick_seconds", 5)):
+            return
+        self._b14_pt_last = _now
+        try:
+            with _st._lock:
+                _assets = {p.asset for p in _st.open_positions}
+        except Exception:
+            _assets = set()
+        if not _assets:
+            return
+        _prices = {}
+        for _a in _assets:
+            _cfg = self.config.get("assets", {}).get(_a, {}) or {}
+            if not _cfg.get("enabled", False) or self.market_status.get(_a, ("OPEN",))[0] == "CLOSED":
+                continue
+            _h = self.binance_handler if _cfg.get("exchange", "binance") == "binance" else self.mt5_handler
+            if not _h:
+                continue
+            try:
+                _px = _h.get_current_price(self._resolve_symbol(_a))
+                if _px and _px > 0:
+                    _prices[_a] = float(_px)
+            except Exception as _pe:
+                logger.debug(f"[SHADOW] practice price for {_a} not read: {_pe}")
+        if _prices:
+            _n = _st.tick_update_all(_prices)
+            if _n:
+                logger.info("[SHADOW] %d practice trade(s) closed by the trade loop", _n)
+
+    def _b14_warn(self, key, fmt, *args):
+        """A failure line at most once every 10 minutes per key (the trade loop retries every few seconds)."""
+        _seen = self.__dict__.setdefault("_b14_warned", {})
+        if time.time() - _seen.get(key, 0.0) >= 600:
+            _seen[key] = time.time()
+            logger.warning(fmt, *args)
+
+    def _b14_hour_feed(self):
+        """B14 item 6.5: hands each B14 trade the newest closed 1H candle within seconds of its close, so the
+        staircase steps on it (checked every 15 s; only trades taken under the B14 rules)."""
+        _now = time.time()
+        if _now - getattr(self, "_b14_hf_last", 0.0) < 15:
+            return
+        self._b14_hf_last = _now
+        _todo = [p for p in list((self.portfolio_manager.positions or {}).values())
+                 if getattr(getattr(p, "trade_manager", None), "ns_b14", False)]
+        if not _todo:
+            return
+        try:
+            import MetaTrader5 as _mt5_14
+        except Exception as _ie:
+            self._b14_warn("mt5", "[NS-STAIR-FAIL] MT5 module not available: %s", _ie)
+            return
+        _utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        for _p in _todo:
+            try:
+                _r = _mt5_14.copy_rates_from_pos(self._resolve_symbol(_p.asset), _mt5_14.TIMEFRAME_H1, 0, 3)
+                if _r is None or len(_r) == 0:
+                    self._b14_warn("rates|" + _p.asset, "[NS-STAIR-FAIL] %s: no 1H candles from MT5", _p.asset)
+                    continue
+                _closed = [x for x in _r if pd.Timestamp(int(x["time"]), unit="s") + pd.Timedelta(hours=1) <= _utc]
+                if not _closed:
+                    continue
+                _x = _closed[-1]
+                _p.trade_manager.b14_hour_close(pd.Timestamp(int(_x["time"]), unit="s") + pd.Timedelta(hours=1),
+                                                float(_x["close"]))
+            except Exception as _fe:
+                self._b14_warn("feed|" + _p.asset, "[NS-STAIR-FAIL] %s: 1H close not handed over: %s", _p.asset, _fe)
+
+    def _b14_pkg_chart(self, asset_name, df, _cs):
+        """B14 item 1.1b: the combined chart goes out with a package decision made in the first look too."""
+        try:
+            from src.ai.combined_chart import write_combined as _b14_cw
+            _cp = _b14_cw(asset_name, df, _cs,
+                          symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
+            if _cp and getattr(self.telegram_bot, "send_photo_file", None):
+                self._send_telegram_notification(self.telegram_bot.send_photo_file(_cp, "%s -- combined chart" % asset_name))
+        except Exception as _ce14:
+            logger.warning("[COMBINED-CHART] %s: not sent with the package decision: %s", asset_name, _ce14)
+
+    def _b14_startup_checks(self):
+        """B14 at start-up: item 7.8 (a market running on the code's built-in settings instead of config.json gets a
+        Telegram), the brakes (2.1-2.4) and the B14 rules switch, each said once."""
+        try:
+            from src.execution.ns_engine import market_settings as _ms14
+            _pc = self.config.get("phase_config", {}) or {}
+            _bad = []
+            for _a, _c in (self.config.get("assets", {}) or {}).items():
+                if not (_c or {}).get("enabled", False):
+                    continue
+                _m = _ms14(_a, _pc)
+                if _m is not None and _m.get("builtin"):
+                    _bad.append("%s (entry %s, package %s, exit %s)" % (_a, _m.get("entry"), _m.get("package"), _m.get("exit")))
+            if _bad:
+                logger.warning("[CONFIG] these markets run on the code's built-in settings (no ns_markets block in "
+                               "config.json): %s", "; ".join(_bad))
+                self._b13_tg_direct("TBOT START-UP: these markets run on the code's BUILT-IN settings, not your "
+                                    "config.json: " + "; ".join(_bad))
+            else:
+                logger.info("[CONFIG] every enabled market reads its own ns_markets block from config.json")
+            _rk = self.config.get("risk_management", {}) or {}
+            _pf = self.config.get("portfolio", {}) or {}
+            logger.info("[BRAKES] day brakes (%.0f%% and %.0f%%): %s | profit lock: %s | top brake %.0f%% and %s-loss "
+                        "brake: on", 100 * float(_rk.get("max_daily_loss_pct", 0.05) or 0),
+                        100 * float(_rk.get("circuit_breaker_loss_pct", 0.10) or 0),
+                        "ON" if _rk.get("daily_loss_brakes_enabled", True) else "OFF",
+                        "ON" if _pf.get("profit_lock_enabled", True) else "OFF",
+                        100 * float(_pf.get("max_drawdown", 0.15) or 0), _rk.get("max_loss_streak", 5))
+            logger.info("[B14] new rules switch (phase_config.b14_rules_enabled): %s",
+                        "ON" if _pc.get("b14_rules_enabled", False) else "OFF -- the B13 rules trade")
+        except Exception as _sc14:
+            logger.warning("[CONFIG] start-up checks failed: %s", _sc14)
+
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
         try:
@@ -4538,9 +4732,14 @@ class TradingBot:
             time_since_last = (current_time - self._last_history_update).total_seconds() if self._last_history_update else "N/A"
             logger.info(f"[HISTORY] Last update: {self._last_history_update} ({time_since_last}s ago)")
 
+            # B14 (knock-on of item 3.1): with one look every 30 minutes, "more than 3600 s since the last update" can
+            # miss by a second and then wait another 30 minutes (a 90-minute gap). The files are now also updated at
+            # the first look of each new hour (the hour's candle has just closed), so they stay hourly on either timer.
             if (
                 self._last_history_update is None
                 or (current_time - self._last_history_update).total_seconds() > 3600
+                or current_time.replace(minute=0, second=0, microsecond=0)
+                > self._last_history_update.replace(minute=0, second=0, microsecond=0)
             ):  # 1 hour
 
                 logger.info("[HISTORY] Updating historical CSV files...")
@@ -4965,7 +5164,8 @@ class TradingBot:
                 # gets one real observed price point per cycle -- no post-hoc
                 # reconstruction needed for any future replay.
                 try:
-                    self._capture_open_position_paths()
+                    if not self.config["trading"].get("look_on_candle_close", True):   # B14: else its own 5-min timer
+                        self._capture_open_position_paths()
                 except Exception as _pc_err:
                     logger.warning(f"[PATH-CAPTURE] Skipped this cycle: {_pc_err}")
 
@@ -5436,6 +5636,13 @@ class TradingBot:
                             self.portfolio_manager.save_portfolio_state(include_metrics=False)   # B6-6: metrics are _persist_periodic_state's job
                         except Exception as _se:
                             logger.error(f"[VTM LOOP] Periodic state save failed: {_se}")
+
+                # B14 item 3.3: practice exits every few seconds, like live trades; B14 item 6.5: new 1H closes reach
+                # the staircase of trades taken under the B14 rules within seconds
+                self._vtm_last_call = "b14_practice_tick"
+                self._b14_practice_tick()
+                self._vtm_last_call = "b14_hour_feed"
+                self._b14_hour_feed()
 
                 # Sleep until the next update
                 time.sleep(update_interval)
@@ -6207,6 +6414,10 @@ class TradingBot:
         # ✅ C-2 FIX: self.daily_loss was never written — circuit breaker was
         # permanently disabled (always read 0.0).  Compute daily loss live
         # from session_start_equity vs current equity instead.
+        # B14 items 2.1-2.2 (Desire 8 Oct): the 4% day brake and the hidden 10% one below are off when
+        # risk_management.daily_loss_brakes_enabled is false (a missing key keeps both on, as before). The 15% top
+        # brake and the 5-loss brake (portfolio_manager.check_circuit_breaker) stay.
+        _day_brakes_on = bool(risk_cfg.get("daily_loss_brakes_enabled", True))
         max_daily_loss = risk_cfg.get("max_daily_loss_pct", 0.05)
         _pm = self.portfolio_manager
         if (
@@ -6221,7 +6432,7 @@ class TradingBot:
         else:
             _daily_loss_pct = 0.0
 
-        if _daily_loss_pct >= max_daily_loss:
+        if _day_brakes_on and _daily_loss_pct >= max_daily_loss:
             self._last_limit_reason = (
                 f"Daily loss limit reached ({_daily_loss_pct:.2%} ≥ {max_daily_loss:.2%})"
             )
@@ -6230,7 +6441,7 @@ class TradingBot:
 
         circuit_breaker = risk_cfg.get("circuit_breaker_loss_pct", 0.10)
         loss_pct = _daily_loss_pct
-        if loss_pct >= circuit_breaker:
+        if _day_brakes_on and loss_pct >= circuit_breaker:
             self._last_limit_reason = (
                 f"Circuit breaker tripped: drawdown {loss_pct:.2%} ≥ {circuit_breaker:.2%}"
             )
@@ -6751,7 +6962,122 @@ class TradingBot:
         reraise=False,
         default_return=None,
     )
+    # -- B14 (Desire 7-9 Oct): helpers ---------------------------------------------------------------------
+    def _b14_ns_frame(self, asset_name, exchange, symbol, asset_cfg, df):
+        """B14 item 1.2a (Desire 8 Oct): the new engine's own ~75 days of hourly candles -- its "old high/low ahead"
+        check looks back 60 days and its rebuild 30, but it was handed only the 25 days the rest of the bot reads.
+        Everything else keeps the 25 days. Fetched once per new candle (the trading look reuses the recording look's
+        copy). If it can't be fetched, the engine reads the usual candles and the log says so."""
+        try:
+            if df is None or len(df) == 0:
+                return df
+            _last = df.index[-1]
+            _cache = self.__dict__.setdefault("_b14_ns_cache", {})
+            if _cache.get(asset_name) is not None and _cache[asset_name][0] == _last:
+                return _cache[asset_name][1]
+            _days = int((self.config.get("phase_config", {}) or {}).get("ns_engine_days", 75))
+            _end = datetime.now(timezone.utc)
+            _start = _end - timedelta(days=_days)
+            if exchange == "binance":
+                _long = self.data_manager.fetch_binance_data(
+                    symbol=symbol, interval=asset_cfg.get("interval", "1h"),
+                    start_date=_start.strftime("%Y-%m-%d"), end_date=_end.strftime("%Y-%m-%d %H:%M:%S"))
+            else:
+                _long = self.data_manager.fetch_mt5_data(
+                    symbol=symbol, timeframe=asset_cfg.get("timeframe", "H1"),
+                    start_date=_start.strftime("%Y-%m-%d"), end_date=_end.strftime("%Y-%m-%d %H:%M:%S"))
+            _long = self.data_manager.clean_data(_long)
+            if _long is not None and not _long.empty:
+                _floor = pd.Timestamp.now(tz="UTC").floor("h")
+                if _long.index[-1] >= _floor:
+                    _long = _long.iloc[:-1]        # closed candles only, exactly as the 25-day frame
+            if _long is None or len(_long) < len(df):
+                logger.warning("[NS-DATA] %s: the engine's %d-day history could not be fetched (%s candles) -- it reads "
+                               "the usual %d candles this look", asset_name, _days,
+                               0 if _long is None else len(_long), len(df))
+                return df
+            _cache[asset_name] = (_last, _long)
+            _lg = self.__dict__.setdefault("_b14_ns_logged", {})
+            if _lg.get(asset_name) != str(_long.index[0])[:10]:
+                _lg[asset_name] = str(_long.index[0])[:10]
+                logger.info("[NS-DATA] %s: engine history %d hourly candles, %s to %s (%.0f days)", asset_name, len(_long),
+                            str(_long.index[0])[:16], str(_long.index[-1])[:16],
+                            (_long.index[-1] - _long.index[0]).total_seconds() / 86400.0)
+            return _long
+        except Exception as _nf_e:
+            logger.warning("[NS-DATA] %s: engine history fetch failed (%s) -- it reads the usual candles this look",
+                           asset_name, _nf_e)
+            return df
+
+    def _b14_pkg_event(self, ev):
+        """B14 item 1.1b (Desire 8 Oct): a package decision goes to Telegram the moment it is made, from whichever
+        look makes it (registered with ns_package.add_sink at start-up). Before B14 only the trading look's
+        decisions were sent, so the first look's decisions -- most of them -- never reached you."""
+        text = str((ev or {}).get("text", ""))
+        if not text:
+            return
+        _tg = getattr(self, "telegram_bot", None)
+        if _tg is not None and getattr(_tg, "_is_ready", False):
+            _coro = _tg.send_message(text=text, parse_mode="HTML")
+            if _coro:
+                self._send_telegram_notification(_coro)
+                return
+        import re as _re14
+        self._b13_tg_direct(_re14.sub(r"<[^>]+>", "", text))      # the direct sender logs any failure
+
+    def _b14_builder(self, asset_name):
+        """The market's composite-state builder (it holds the new engine's memory and the package's board)."""
+        _agg = (getattr(self, "aggregators", None) or {}).get(asset_name)
+        for _c in ((_agg.get("livermore"), _agg.get("performance")) if isinstance(_agg, dict) else (_agg,)):
+            _b = getattr(_c, "_cs_builder", None)
+            if _b is not None:
+                return _b
+        return None
+
+    def _b14_position_ids(self, asset_name):
+        try:
+            return {pid for pid, p in list(self.portfolio_manager.positions.items())
+                    if getattr(p, "asset", None) == asset_name}
+        except Exception:
+            return set()
+
     def trade_asset(self, asset_name: str):
+        """B14 item 1.1c (Desire 8 Oct): the trading look. The look itself is unchanged (_b14_trade_asset_inner).
+        Afterwards every package entry still waiting on the board for this market has been used once, and a
+        [PKG-OUTCOME] line says whether it became an order or what refused it -- so an entry can never vanish
+        silently again (the watchdog checks that every [PKG-ENTER] gets one within 10 minutes)."""
+        _cap = _B14RefusalCapture(threading.get_ident())
+        _root = logging.getLogger()
+        _root.addHandler(_cap)
+        _pos0 = self._b14_position_ids(asset_name)
+        try:
+            return self._b14_trade_asset_inner(asset_name)
+        finally:
+            _root.removeHandler(_cap)
+            try:
+                from src.execution import ns_package as _nsp14
+                _b14b = self._b14_builder(asset_name)
+                _st14 = (getattr(_b14b, "_ns_state", None) or {}).get(asset_name) if _b14b is not None else None
+                if _st14 and _nsp14.ready_proofs(_st14):
+                    _new = [pid for pid in self._b14_position_ids(asset_name) if pid not in _pos0]
+                    _tm14 = getattr(self.portfolio_manager.positions.get(_new[0]), "trade_manager", None) if _new else None
+                    if _new and _tm14 is not None and getattr(_tm14, "ns_pkg_stop", None) is None:
+                        # a position opened, but from the engine's own signal (one position per market): say so
+                        _nsp14.settle(_st14, asset_name, "refused", "another signal on this market traded instead "
+                                      "(position %s, not the package entry)" % _new[0])
+                    elif _new:
+                        _p14 = self.portfolio_manager.positions.get(_new[0])
+                        _nsp14.settle(_st14, asset_name, "order", "position %s opened (%s%s)" % (
+                            _new[0], getattr(_p14, "side", "?"),
+                            (", MT5 ticket %s" % _p14.mt5_ticket) if getattr(_p14, "mt5_ticket", None) else ""))
+                    else:
+                        _nsp14.settle(_st14, asset_name, "refused", _cap.reason() or
+                                      "no order, and no refusal line was found in this look (a start-up hold or a check "
+                                      "that only logs at debug level) -- see the log around now")
+            except Exception as _po_e:
+                logger.warning("[PKG-OUTCOME] %s: package entry bookkeeping failed: %s", asset_name, _po_e)
+
+    def _b14_trade_asset_inner(self, asset_name: str):
         """
         ✅ FIXED: Execute trading logic with proper MTF filtering for ALL aggregator types
         """
@@ -6860,6 +7186,10 @@ class TradingBot:
                 _now_floor = pd.Timestamp.now(tz='UTC').floor('h')
                 if df.index[-1] >= _now_floor:
                     df = df.iloc[:-1]
+
+            # B14 item 1.2a: the new engine's own ~75 days (engine only)
+            self.__dict__.setdefault("_b14_df_ns", {})[asset_name] = self._b14_ns_frame(asset_name, exchange, symbol,
+                                                                                         asset_cfg, df)
 
             # Cache the closed 1H dataframe so the VTM circuit breaker can see it.
             self._df_1h_cache[asset_name] = df
@@ -7023,6 +7353,7 @@ class TradingBot:
                         mtf_regime["df_4h"] = self._df_4h_cache.get(asset_name)
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
+                        mtf_regime["df_1h_ns"] = (getattr(self, "_b14_df_ns", None) or {}).get(asset_name)   # B14 1.2a
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
@@ -7081,12 +7412,9 @@ class TradingBot:
                             live_price=current_price
                         )
                 details["aggregator_mode"] = "council"
-                # B13 (Desire 2 Oct): the package's decisions (taken over / entered / cancelled) -- never silent
-                for _pkg_ev in (getattr(_cs, "pkg_events", None) or []):
-                    try:
-                        self._b7_telegram(str(_pkg_ev.get("text", "")))
-                    except Exception as _pkg_tg_err:
-                        logger.warning("[PKG] %s: Telegram notice failed: %s", asset_name, _pkg_tg_err)
+                # B13 (Desire 2 Oct): the package's decisions (taken over / entered / cancelled) -- never silent.
+                # B14 item 1.1b: the text notices now go out the moment the package decides (ns_package.add_sink, set
+                # at start-up), from whichever look decides; this look still sends the chart with them.
                 if getattr(_cs, "pkg_events", None):            # B13 item 9B: the combined chart with every package decision
                     try:
                         from src.ai.combined_chart import write_combined as _b13_cw3
@@ -7658,6 +7986,7 @@ class TradingBot:
                             "same_side_active", asset_cfg,
                             gate_id="same_side_active", gate_stage="post_approval",
                         )
+                        details["same_side_dir"] = 1 if _new_side == "long" else -1   # B14 item 1.4
                         signal = 0
                         details["same_side_suppressed"] = True
 
@@ -7960,6 +8289,27 @@ class TradingBot:
                     if getattr(self, "funnel_logger", None) is not None:
                         try:
                             self.funnel_logger.record(asset_name, 0, {"reasoning": "blocked_same_direction", "episode_id": details.get("episode_id")})
+                        except Exception:
+                            pass
+                    return
+
+                # B14 item 1.4 (Desire 8 Oct): a signal stopped because a trade is already open on this market is filed
+                # as that -- "position already open" -- not as a council "Hold" (6 Oct USOIL: the ledger said "Hold
+                # (Score: 1.62/2.7)" and a second practice record was opened under aggregator_other). The same-side
+                # guard above has already opened its one practice record (gate_id=same_side_active).
+                if details.get("same_side_suppressed"):
+                    self._notify_blocked(
+                        asset=asset_name, signal=int(details.get("same_side_dir", 0) or 0),
+                        block_source="Position Already Open",
+                        block_reason="a trade in the same direction is already open on this market (no adding)",
+                        details=details, price=details.get("price"),
+                    )
+                    logger.info(f"[HOLD] {asset_name}: Signal BLOCKED by Position Already Open (a same-side "
+                                f"position is already open -- no adding) gate_id=same_side_active")
+                    if getattr(self, "funnel_logger", None) is not None:
+                        try:
+                            self.funnel_logger.record(asset_name, 0, {"reasoning": "same_side_active",
+                                                                      "episode_id": details.get("episode_id")})
                         except Exception:
                             pass
                     return
@@ -9222,6 +9572,9 @@ class TradingBot:
                     f"[SIGNAL] {asset_name}: Insufficient data ({len(df)}/250)"
                 )
                 return
+            # B14 item 1.2a: the new engine's own ~75 days (engine only)
+            self.__dict__.setdefault("_b14_df_ns", {})[asset_name] = self._b14_ns_frame(asset_name, exchange, symbol,
+                                                                                         asset_cfg, df)
 
             # Get handler for current price
             handler = (
@@ -9397,10 +9750,13 @@ class TradingBot:
                                 mtf_regime["df_4h"] = _fresh_4h
                 if _lsm_comp is not None and hasattr(_lsm_comp, "_build_composite_state"):
                     try:
+                        mtf_regime["df_1h_ns"] = (getattr(self, "_b14_df_ns", None) or {}).get(asset_name)   # B14 1.2a
                         _cs = _lsm_comp._build_composite_state(df, mtf_regime.get("df_4h"), mtf_regime)
                         mtf_regime["composite_state"] = _cs
                     except Exception as _cs_err:
                         logger.debug("[council] composite_state build failed for %s: %s", asset_name, _cs_err)
+                    if getattr(_cs, "pkg_events", None):          # B14 item 1.1b: the chart with this look's decisions
+                        self._b14_pkg_chart(asset_name, df, _cs)
 
                 # B6: same lifecycle-classifier wiring as sites 1/2 of 3
                 # -- this ranking/caching pass reads governor_data via the
@@ -10505,7 +10861,17 @@ class TradingBot:
 
             # Schedule trading cycles
             check_interval = self.config["trading"].get("check_interval_seconds", 300)
-            schedule.every(check_interval).seconds.do(self.run_trading_cycle)
+            # B14 item 3.1 (Desire 8 Oct): one look at every 30-minute close (:00 and :30 UTC), about 30 seconds after
+            # it. trading.look_on_candle_close = false brings back the old 5-minute timer without a code change.
+            if self.config["trading"].get("look_on_candle_close", True):
+                schedule.every(5).seconds.do(self._b14_look_tick)
+            else:
+                schedule.every(check_interval).seconds.do(self.run_trading_cycle)
+            # B14 (knock-ons of 3.1): queued Telegram commands and path capture keep their own pace (on the old 5-minute
+            # timer the look itself captures the paths, so the separate path tick runs only with looks on candle closes)
+            schedule.every(10).seconds.do(self._b14_telegram_tick)
+            if self.config["trading"].get("look_on_candle_close", True):
+                schedule.every(5).minutes.do(self._b14_path_tick)
             schedule.every(1).hours.do(self.log_detailed_pnl_report)
 
             # Phase 2: System Validator watchdog — runs every 5 minutes
@@ -10565,16 +10931,31 @@ class TradingBot:
 
             logger.info(f"\n[OK] Trading bot running")
             logger.info(
-                f"[TIME] Cycle interval: {check_interval}s ({check_interval / 60:.1f}min)"
+                "[TIME] Looks: %s" % ("at every 30-minute close (:00 and :30 UTC) + %ss" % self.config["trading"].get(
+                    "look_delay_seconds", 30) if self.config["trading"].get("look_on_candle_close", True)
+                    else "every %ss (old timer)" % check_interval)
             )
-            logger.info(f"[MTF] Regime updates: Every cycle (~{check_interval}s), 5-min detector cache")
+            logger.info("[MTF] Regime updates: every look, 5-min detector cache")   # B14 3.1: was "Every cycle (~300s)"
             logger.info(f"Press Ctrl+C to stop\n")
+
+            # B14 item 1.1b: package decisions reach Telegram the moment they are made (from any look)
+            try:
+                from src.execution import ns_package as _nsp14
+                _nsp14.add_sink(self._b14_pkg_event)
+            except Exception as _sk14:
+                logger.warning("[PKG] Telegram sink not set: %s", _sk14)
+            self._b14_startup_checks()
 
             # Phase 1: Warm-start Livermore state machines before first cycle
             self._warm_start_price_sanity_all_assets()
             self._warm_start_livermore_all_assets()
 
             # Run initial cycle
+            # B14 item 3.1: when the start comes after this slot's look time, this first look covers the slot
+            _n14 = datetime.now(timezone.utc)
+            _s14 = _n14.replace(minute=(_n14.minute // 30) * 30, second=0, microsecond=0)
+            if _n14 >= _s14 + timedelta(seconds=float(self.config["trading"].get("look_delay_seconds", 30))):
+                self._b14_last_slot = _s14
             self.run_trading_cycle()
 
             _restart_flag = str(Path("logs") / "restart.flag")
