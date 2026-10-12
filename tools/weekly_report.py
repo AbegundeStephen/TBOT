@@ -5,6 +5,7 @@ Rows: the diary, logs/episodes/episodes_*.jsonl.
   A           practice trades the council sat on (proof-based)
   B-TF, B-MR  practice trades a strategy held back because the proof belonged to the other lane
   C           the random control lane
+  X           the B12 exploration ideas (B15 lane A1: moved out of A, so A - C measures proofs)
 Plus BTC's own line: its running live total against the -6R pause (data/ns_market_pause.json).
 Rows missing a result are COUNTED and listed, never silently dropped.
 
@@ -24,7 +25,8 @@ R_KEYS = ("net_pnl_r", "pnl_r", "r_multiple", "gross_r")
 TIME_KEYS = ("close_time", "exit_time", "closed_at")
 LANES = {"LIVE": "real trades", "A": "practice: the council sat on a proof",
          "B-TF": "practice: trend strategy held back (proof in the other lane)",
-         "B-MR": "practice: reversal strategy held back (proof in the other lane)", "C": "practice: random control"}
+         "B-MR": "practice: reversal strategy held back (proof in the other lane)", "C": "practice: random control",
+         "X": "practice: B12 exploration ideas (paper only; B15 lane A1 -- no longer counted in A)"}
 
 
 def _first(r, keys):

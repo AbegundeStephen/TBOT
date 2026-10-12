@@ -677,23 +677,38 @@ class MarketMap:
         """Every drawn diagonal between two 4H closes, as segments with their state at each candle: 'awake' (solid
         black), 'asleep' (dashed), 'broken' (solid dark red, from the first break on). -> [dict(ln, big, segs)] where segs
         = [(state, [x...], [level...])]."""
+        # B15 Part 6.1 (chart only; the engine's breaks and states are untouched): a line is drawn from its FIRST swing
+        # (not from 2 candles after the second); a small line is shown only while awake; a line that price jumped
+        # across (a 4H close past its three-quarter mark) while it was asleep is shown as broken from that candle.
         out = []
         for g in self.diags:
             x0 = max(g.start, b_from)
             if x0 > b_to:
                 continue
             brk0 = g.breaks[0][0] if g.breaks else None
+            for x in range(x0, b_to + 1):                       # (4) the first asleep cross, if before the real break
+                if brk0 is not None and x >= brk0:
+                    break
+                c0 = g.cls_at(x)
+                if c0 == 0 or g.awake_at(x):
+                    continue
+                a_ = self.a4_at(x)
+                if not (a_ and a_ == a_):
+                    continue
+                if g.d * (float(self.c4[x]) - g.level(x)) / a_ >= (SPH_BIG if c0 == 2 else SPH_SMALL) * BREAK_FRAC:
+                    brk0 = x
+                    break
             segs, cur, xs, ys = [], None, [], []
             anyd = False
             for x in range(x0, b_to + 1):
                 c0 = g.cls_at(x)
-                if c0 == 0 and (brk0 is None or x < brk0):
+                stt = "broken" if (brk0 is not None and x >= brk0) else ("awake" if g.awake_at(x) else "asleep")
+                if (c0 == 0 and (brk0 is None or x < brk0)) or (c0 == 1 and stt == "asleep"):   # (2) small: awake only
                     if xs:
                         segs.append((cur, xs, ys))
                         cur, xs, ys = None, [], []
                     continue
                 anyd = True
-                stt = "broken" if (brk0 is not None and x >= brk0) else ("awake" if g.awake_at(x) else "asleep")
                 if stt != cur and xs:
                     segs.append((cur, xs + [x], ys + [g.level(x)]))
                     xs, ys = [], []
@@ -703,6 +718,9 @@ class MarketMap:
             if xs:
                 segs.append((cur, xs, ys))
             if anyd and segs:
+                st0, xs0, ys0 = segs[0]                           # (1) from the first swing: the first piece starts at i1
+                if xs0[0] == x0 and g.i1 < x0 and st0 != "broken":
+                    segs[0] = (st0, [max(g.i1, b_from)] + xs0, [g.level(max(g.i1, b_from))] + ys0)
                 out.append(dict(ln=g.ln, big=bool(g.cls_at(b_to) == 2 or (g.cls[:max(1, b_to - g.start + 1)] == 2).any()),
                                 segs=segs, d=g.d, i1=g.i1, v1=g.v1, slope=g.slope,
                                 broken_at=brk0, open_end=(brk0 is None and g.cls_at(b_to) != 0)))

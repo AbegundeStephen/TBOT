@@ -28,6 +28,10 @@ for f in sorted(glob.glob(os.path.join("logs", "trading_bot.log*"))):
                             "[PKG-OUTCOME]", "EXPIRED: no trading look", "[PKG-REARM]", "[NS-REBUILD]", "[NS-ROUTE]",
                             "[NS-LOCK]", "[NS-STAIR]", "[NS-STAIR-FAIL]", "[NS-WALLS]", "[RUNNER-RUN]", "[NS-MAP]",
                             "[LOOK] the", "[CONFIG] these markets run on",
+                            # B15 (Desire 12 Oct, Part 3): the path per break, the 4H clock's progress lines, the
+                            # must-never-happen line, a 4H entry not taken (stop too wide), the B15 start-up line
+                            "[NS-PATH]", "[PKG-4H]", "[B15-NEVER]", "stop too wide at the smallest lot",
+                            "closed at the switch to the B15 rules", "[B15] rules",
                             "[STATE] Account metrics restore failed", "[STATE] Skipping metrics restore"):
                     if tag in line:
                         cnt[tag] += 1

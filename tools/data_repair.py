@@ -16,6 +16,13 @@ NOW = datetime.now(timezone.utc)
 SETTLED = pd.Timestamp(NOW.replace(tzinfo=None)) - pd.Timedelta(hours=6)
 BK = "data/raw_backup_" + NOW.strftime("%Y%m%d_%H%M")
 FILES = [(s, tf, k, h, "data/raw/%s_%s.csv" % (s, tf)) for s in SYMS for tf, k, h in TFS if os.path.exists("data/raw/%s_%s.csv" % (s, tf))]
+# B15 Part 6.2 (Desire 12 Oct): a missing 1h or 4h file is an ERROR (exit code 3), never a quiet skip -- the engine and
+# the line map read exactly these files. A missing 15m file (JP225, SILVER, AUDJPY have none) is not an error.
+_need = ["data/raw/%s_%s.csv" % (s, tf) for s in SYMS for tf in ("1h", "4h")]
+_missing = [p for p in _need if not os.path.exists(p)]
+if _missing:
+    print("FAILED: these price files are MISSING (the bot's engine reads them): " + ", ".join(_missing))
+    _sys.exit(3)
 os.makedirs(BK, exist_ok=True)
 [shutil.copy2(x[4], BK) for x in FILES]
 print("step 1: backed up %d files to %s" % (len(FILES), BK))

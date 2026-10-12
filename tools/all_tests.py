@@ -747,14 +747,40 @@ def _line(lab, v):
     return "   %-44s%6d%+10.2f%8.0f%%" % (lab, len(v), sum(v) / len(v), 100.0 * sum(1 for x in v if x > 0) / len(v))
 
 
+COUNCIL_DONE = os.path.join("logs", "council_verdict.txt")     # B15 Part 5: written once, at 20 HOLD trades
+
+
 def weekly_council(days=28):
     print("\n" + "=" * 110)
     print("WEEKLY -- COUNCIL ADVISORY (B12): live trades the council PASSED against those it refused (HOLD), last %d days" % days)
     print("=" * 110)
+    # B15 Part 5 (Desire 12 Oct, "trim"): this section stays until it has 20 HOLD trades, prints its verdict once
+    # (kept in logs\council_verdict.txt), then only points at that file.
+    if os.path.exists(COUNCIL_DONE):
+        print("   verdict already given -- see %s:" % COUNCIL_DONE)
+        print("   " + open(COUNCIL_DONE, encoding="utf-8", errors="replace").read().strip().replace("\n", "\n   "))
+        return
     rows = [(r, rv) for r, rv in _diary_rows(days) if str(r.get("source", "live")) == "live" and rv is not None
             and not r.get("external") and not r.get("adopted")]
     got = [((r.get("council_vote") or ("HOLD" if r.get("trial_only") else None)), rv) for r, rv in rows]
     got = [(v, rv) for v, rv in got if v in ("PASS", "HOLD")]
+    _hold = [rv for v, rv in got if v == "HOLD"]
+    _pass = [rv for v, rv in got if v == "PASS"]
+    if len(_hold) >= 20:
+        _mh = sum(_hold) / len(_hold)
+        _mp = (sum(_pass) / len(_pass)) if _pass else float("nan")
+        verdict = ("COUNCIL VERDICT (%s): %d HOLD trades, mean %+.2fR a trade; %d PASS trades, mean %+.2fR. %s" % (
+            datetime.now().strftime("%d %b %Y"), len(_hold), _mh, len(_pass), _mp,
+            "HOLD did as well as PASS or better -> the council's vote adds nothing (Desire decides what to do with it)."
+            if not _pass or _mh >= _mp else "PASS did better than HOLD -> the council's vote is worth something (Desire decides)."))
+        print("   " + verdict)
+        try:
+            os.makedirs("logs", exist_ok=True)
+            open(COUNCIL_DONE, "w", encoding="utf-8").write(verdict + "\n")
+            print("   (written to %s -- this section now retires)" % COUNCIL_DONE)
+        except OSError as _e:
+            print("   (could not write %s: %s -- the verdict will print again next week)" % (COUNCIL_DONE, _e))
+        return
     if not got:
         keys = sorted(rows[0][0].keys()) if rows else []
         print("   no live trades with a council vote yet (B12 not live, or no trades yet)")
@@ -1862,7 +1888,15 @@ def main():
                 print("%s FAILED: %s: %s" % (label, type(ex).__name__, ex))
     fdf = pd.DataFrame()
     try:
-        fdf = test2(ns, bt)
+        if weekly:
+            # B15 decision D3 (Desire 12 Oct): TEST 2 (the B11 rules frozen on 24 Sep) is dropped from the Saturday run;
+            # its 30-trade rule now applies to B15's live trades (tools/b15_weekly.py). The forward frame is still
+            # built here, silently, because the paper ideas below measure on it.
+            print("\n   TEST 2 (the B11 rules frozen on 24 Sep) is no longer run on Saturdays -- B15 decision D3: its "
+                  "30-trade rule now applies to the B15 live trades, in the B15 weekly replay (logs\\b15_weekly_<date>.txt)")
+            fdf = run_window(ns, FREEZE + pd.Timedelta(minutes=1), pd.Timestamp("2100-01-01"))
+        else:
+            fdf = test2(ns, bt)
     except Exception as ex:
         print("TEST 2 FAILED: %s: %s" % (type(ex).__name__, ex))
     ns["START"], ns["END"] = ns_start_bt, ns_end_bt
