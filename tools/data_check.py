@@ -10,8 +10,16 @@ print("MT5 connected:", _ok)
 if not _ok:
     print("FAILED: MT5 is not connected (" + str(mt5.last_error()) + ") -- nothing was checked.")
     _sys.exit(2)
-S = {"BTC": "BTCUSDm", "GOLD": "XAUUSDm", "USTEC": "USTECm", "EURUSD": "EURUSDm", "USOIL": "USOILm", "GBPAUD": "GBPAUDm"}
+# B15 Part 6.2 (Desire 12 Oct; B14 flag F19): all 10 markets, and a missing 1H or 4H file is an ERROR (exit code 3),
+# never a quiet skip -- the engine and the line map read exactly these files.
+S = {"BTC": "BTCUSDm", "GOLD": "XAUUSDm", "USTEC": "USTECm", "EURUSD": "EURUSDm", "USOIL": "USOILm", "GBPAUD": "GBPAUDm",
+     "JP225": "JP225m", "EURJPY": "EURJPYm", "SILVER": "XAGUSDm", "AUDJPY": "AUDJPYm"}
 T = [("1h", mt5.TIMEFRAME_H1, 1), ("4h", mt5.TIMEFRAME_H4, 4)]
+import os as _os
+_missing = ["data/raw/%s_%s.csv" % (s, tf) for a, s in S.items() for tf, k, h in T if not _os.path.exists("data/raw/%s_%s.csv" % (s, tf))]
+if _missing:
+    print("FAILED: these price files are MISSING (the bot's engine reads them): " + ", ".join(_missing))
+    _sys.exit(3)
 F = {(a, tf): pd.read_csv("data/raw/%s_%s.csv" % (s, tf), parse_dates=[0], index_col=0) for a, s in S.items() for tf, k, h in T}
 F = {key: f.set_axis((f.index.tz_localize(None) if getattr(f.index, "tz", None) is not None else f.index).astype("datetime64[ns]")) for key, f in F.items()}
 F = {key: f[~f.index.duplicated(keep="last")] for key, f in F.items()}
@@ -24,3 +32,8 @@ print("--- saved price files (data/raw) against MT5's own candles, 1 Jun 2025 to
 [print("%-7s %-3s  compared %6d  differ %4d  (%.2f%%)  since 24 Sep: %d   last 3: %s" % (key[0], key[1], len(C[key]), len(D[key]), 100.0 * len(D[key]) / max(1, len(C[key])), sum(1 for ts in D[key] if ts >= pd.Timestamp("2026-09-24")), ", ".join("%s (file %.6g / MT5 %.6g)" % ((ts + pd.Timedelta(hours=H[key[1]])).strftime("%d %b %H:%M"), float(F[key]["close"][ts]), float(M[key]["close"][ts])) for ts in D[key][-3:]) or "-")) for key in sorted(M)]
 print("--- hour of day (UTC, candle close) of every differing candle ---")
 print(pd.Series([(ts + pd.Timedelta(hours=H[key[1]])).hour for key in M for ts in D[key]]).value_counts().sort_index().to_dict())
+_nomt5 = [key for key in F if key not in M]
+if _nomt5:
+    print("FAILED: MT5 returned no candles for %s -- those files were NOT checked" % ", ".join("%s %s" % k for k in sorted(_nomt5)))
+    _sys.exit(4)
+print("checked: %d files, all 10 markets, 1h and 4h" % len(F))

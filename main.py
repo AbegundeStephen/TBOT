@@ -3383,8 +3383,10 @@ class TradingBot:
                     continue
                 _det = {"composite_state": dict(_p.get("fields") or {}), "setup_ref": _p.get("ref"),
                         "explore": _var, "reasoning": "B12 exploration (paper only): %s" % _var}
+                # B15 lane A1 (Desire 12 Oct): the exploration ideas get their own lane "X", so lane A holds only
+                # real blocked signals and "proofs minus random" (A - C) measures proofs
                 self._shadow_open_blocked(asset_name, _d, _det, df, current_price, "explore_" + _var.lower(),
-                                          asset_cfg, gate_id="explore_" + _var.lower(), gate_stage="explore")
+                                          asset_cfg, lane="X", gate_id="explore_" + _var.lower(), gate_stage="explore")
         except Exception as _xe:
             logger.warning(f"[NS-EXPLORE] {asset_name}: practice trade not opened: {_xe}")
 
@@ -4665,6 +4667,17 @@ class TradingBot:
                         100 * float(_pf.get("max_drawdown", 0.15) or 0), _rk.get("max_loss_streak", 5))
             logger.info("[B14] new rules switch (phase_config.b14_rules_enabled): %s",
                         "ON" if _pc.get("b14_rules_enabled", False) else "OFF -- the B13 rules trade")
+            # B15 Part 3 (Desire 12 Oct): the start-up line says whether the B15 rules trade, and what they are
+            from src.execution.ns_engine import RULES_V as _rv15, B14_KNOBS as _bk15
+            _k15 = dict(_bk15, **(_pc.get("b14_knobs") or {}))
+            logger.info("[B15] rules %s: %s", _rv15, (
+                "ON -- big lines (a major 4H swing) keep the hourly proof; small lines, and big-line signals sent to "
+                "wait, are proven on the 4H clock (a 4H retest, then a 4H close past the peak; up to 7 + 7 days); no "
+                "lock at walls; staircase %s; a 4H stop too wide: %s; clock %s; clearance %s" % (
+                    "from the entry" if _k15.get("stair", True) else "OFF", _k15.get("wide"), _k15.get("clock"),
+                    _k15.get("trigger_clear")))
+                if _pc.get("b14_rules_enabled", False) else "OFF -- the B13 rules trade (the B15 code is installed, "
+                "switched off: phase_config.b14_rules_enabled)")
         except Exception as _sc14:
             logger.warning("[CONFIG] start-up checks failed: %s", _sc14)
 

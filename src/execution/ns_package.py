@@ -15,9 +15,12 @@ The package decides with the evidence -- version A since B13 item 29 (Desire 5 O
      close is already past the wall (the bigger line, or the trigger when there is none) -> enter. WEAK = a 1H close, or
      two 30m closes, back past the line -> cancel. Otherwise keep watching.
   3. 24 hours at most; a 4H close past the origin kills it.
-  4. Stop: 0.3 of a 1H move behind the push's extreme since the retest, never closer than 1 move (breathing space).
-     Far entries (over 2.5 moves from the line): behind the last 30m higher low, never closer than 1 move; no trade if
-     that needs more than 3 moves. Target: the market's normal target. The engine's reward:risk gate applies.
+  4. Stop -- B14.1 (Desire 11 Oct, "the stop has to be close", option ii): 0.3 of a 1H move behind the LAST 1H SWING
+     before the entry (the last dip for a buy, the last bounce for a sell, by wick), never closer than 1 move
+     (breathing space). If that stop would be wider than STOP_MAX moves the trade is skipped and said so: at the
+     smallest lot the account cannot carry it (8 Oct SILVER: 4.5 moves = $88 on a $122 account). Before B14.1 the
+     stop sat behind the push's whole extreme since the retest (up to 5 moves; far entries 3).
+     Target: the market's normal target. The engine's reward:risk gate applies.
 Read-only towards MT5 (candles only). Every decision is logged ([PKG-...]) and returned as an event for Telegram.
 
 B14 (Desire 8-9 Oct):
@@ -39,8 +42,8 @@ import logging
 import numpy as np
 import pandas as pd
 
-from src.execution.ns_engine import (STOP_CAP_ATR, atr14, close_times, gate_rr_ok, hourly_to_4h,
-                                     market_settings)
+from src.execution.ns_engine import (PKG_FLOOR_ATR, PKG_STOP_MAX, atr14, close_times, gate_rr_ok, hourly_to_4h,
+                                     market_settings, package_stop)
 
 RE_READ = False                # B13 item 29 (Desire 5 Oct): version A -- the re-read shortcut is off (True = middle way)
 logger = logging.getLogger(__name__)
@@ -48,8 +51,8 @@ logger = logging.getLogger(__name__)
 WAIT_H = 24          # Desire 2 Oct: 24 hours
 NEAR = 0.5           # the engine's PKG_NEAR: a bigger 4H line this close ahead must be cleared too
 FAR = 2.5            # an entry further than this from the line (1H moves) is a far entry
-FLOOR = 1.0          # breathing space: a stop is never closer than 1 move
-CAP = 3.0            # a far entry needing a wider stop than this is not taken
+FLOOR = PKG_FLOOR_ATR      # breathing space: a stop is never closer than 1 move (B15: one value, in ns_engine)
+STOP_MAX = PKG_STOP_MAX    # B14.1: a package stop wider than this (1H moves) = no trade (B15: one value, in ns_engine)
 KEEP_DONE = 20       # finished package records kept for display
 READY_FOR = pd.Timedelta(minutes=30)    # B14 item 1.1: an entry waits for the trading look until the next 30m close
 KEEP_READY = 20
@@ -195,6 +198,14 @@ def ready_proofs(st, now=None, asset=None):
     return out
 
 
+def board_add(st, proof, tau, asset, d, r2):
+    """B15 (Desire 12 Oct): an entry the engine made on the 4H clock waits on the same board as the package's own
+    entries -- used once by the trading look, only until the next 30m close, and settled with a [PKG-OUTCOME] line."""
+    st.setdefault("pkg_ready", []).append({"proof": proof, "t": str(tau), "until": str(pd.Timestamp(tau) + READY_FOR),
+                                           "used": False, "asset": asset, "dir": d, "r2": r2})
+    st["pkg_ready"] = st["pkg_ready"][-KEEP_READY:]
+
+
 def settle(st, asset, outcome, detail, now=None):
     """B14 item 1.1c: called by main.py after every trading look. Every entry still on the board for this market has
     now been used once: it either became an order or was refused, and the [PKG-OUTCOME] line says which and why."""
@@ -290,7 +301,8 @@ def step(asset, st, df1, pcfg, now=None, frames=None, mp=None):
     e30 = pd.Series(c30).ewm(span=20, adjust=False).mean().values
     t1 = close_times(df1, 1)
     c1 = df1["close"].astype(float).values
-    a1 = atr14(df1["high"].astype(float).values, df1["low"].astype(float).values, c1)
+    h1, l1 = df1["high"].astype(float).values, df1["low"].astype(float).values     # B14.1: for the last 1H swing
+    a1 = atr14(h1, l1, c1)
     df4 = hourly_to_4h(df1)
     t4, c4 = close_times(df4, 4), df4["close"].astype(float).values
     proofs, events = [], []
@@ -396,28 +408,18 @@ def step(asset, st, df1, pcfg, now=None, frames=None, mp=None):
             atr = float(a1[j1])
             if not (atr == atr and atr > 0):
                 continue
-            klo2 = int(np.searchsorted(m30.index.values, np.datetime64(pd.Timestamp(rec["t_touch"]) - pd.Timedelta(hours=1))))
-            seg = l30[klo2:k + 1] if d == 1 else h30[klo2:k + 1]
-            stop = (seg.min() if d == 1 else seg.max()) - d * 0.3 * atr
-            if d * (q - r2) / atr > FAR:
-                piv = [seg[i] for i in range(1, len(seg) - 1) if ((seg[i] <= seg[i - 1] and seg[i] <= seg[i + 1]) if d == 1
-                                                                   else (seg[i] >= seg[i - 1] and seg[i] >= seg[i + 1]))]
-                if piv:
-                    stop = piv[-1] - d * 0.3 * atr
-                if d * (q - stop) < FLOOR * atr:
-                    stop = q - d * FLOOR * atr
-                if d * (q - stop) > CAP * atr:
-                    _why = "far entry would need a stop wider than %g moves" % CAP
-                    _note = _rearm(st, rec, _why, tau, df1, kn, events) if b14 else None
-                    _finish(rec, "cancelled", _why, events, tau, note=_note)
-                    decided = True
-                    break
-            if d * (q - stop) < FLOOR * atr:
-                stop = q - d * FLOOR * atr                 # breathing space: never closer than 1 move
-            if d * (q - stop) < cfg["min_sl_pct"] * q:
-                stop = q - d * cfg["min_sl_pct"] * q
-            if d * (q - stop) > STOP_CAP_ATR * atr:
-                stop = q - d * STOP_CAP_ATR * atr
+            # B14.1 (Desire 11 Oct, option ii): the stop sits 0.3 of a move behind the LAST 1H SWING before the entry --
+            # the last dip for a buy (a 1H low below both neighbours' lows, confirmed by the candle after it), the last
+            # bounce for a sell -- looked for from the retest candle to the last closed 1H candle, on the far side of
+            # the entry. With no such swing: the push's own 1H extreme since the retest. Wider than STOP_MAX moves =
+            # no trade (said as a cancel). The far-entry rule (last 30m pivot, 3 moves) is replaced by this one rule.
+            stop, swing, j_sw, _wide = package_stop(d, q, t1, h1, l1, j1, rec["t_touch"], atr, cfg["min_sl_pct"])
+            if _wide:
+                _why = _wide
+                _note = _rearm(st, rec, _why, tau, df1, kn, events) if b14 else None
+                _finish(rec, "cancelled", _why, events, tau, note=_note)
+                decided = True
+                break
             if not gate_rr_ok(q, stop, atr, cfg["min_rr"]):
                 _why = "reward:risk below %.2f at the entry" % cfg["min_rr"]
                 _note = _rearm(st, rec, _why, tau, df1, kn, events) if b14 else None

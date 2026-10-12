@@ -12,8 +12,9 @@ How it runs each row (so the numbers can be checked):
   4. trades are booked one position per market at a time and run on the 30-minute candles: stop, target, the 7-day
      exit, and -- under the B14 rules -- the wall lock and the staircase (line_map.lock_level / stair_step, the same
      functions the trade manager calls). Money = the smallest lot, minus the spread the bot really paid.
-Rows: R0 = the B13 rules on the B14 code (the switch off) -- checked IDENTICAL against the B13 files in
-tools\\b14_b13ref; R1 = B14 as approved; R2.. = R1 with one thing changed. Then: the guard check (no lock or staircase
+Rows: R0 = the B13 rules on the B14 code (the switch off) -- its ENGINE entries checked IDENTICAL against the B13
+files in tools\\b14_b13ref (B14.1: package entries differ by design -- the stop behind the last 1H swing, none wider
+than 2.5 moves -- and are listed beside the check); R1 = B14 as approved; R2.. = R1 with one thing changed. Then: the guard check (no lock or staircase
 move held as [NS-STOP-HOLD]), T4 re-run with spheres (what price does at each kind of line), and the replays.
 
 usage (from C:\\TradingBot\\TBOT, with the bot's python):
@@ -81,13 +82,33 @@ def load_1h(sym):
     return df, "%d hourly candles %s .. %s" % (len(df), str(df.index[0])[:16], str(df.index[-1])[:16])
 
 
+def _export_frames(sym):
+    """B15 (rule set 4.4, 'here, with me, from his price export'): the candles tools\\b15_export.py saved from MT5
+    (data\\b15_export\\<sym>_30m.csv / _1d.csv / _1w.csv -- its own folder: the bot's updater owns data\\raw\\<sym>_1d.csv),
+    used only when MT5 itself is not reachable."""
+    out = {}
+    for name, suf in (("M30", "30m"), ("D1", "1d"), ("W1", "1w")):
+        p = os.path.join("data", "b15_export", "%s_%s.csv" % (sym, suf))
+        if not os.path.exists(p):
+            continue
+        try:
+            f = pd.read_csv(p, parse_dates=[0], index_col=0)
+            f.index = pd.DatetimeIndex(f.index).tz_localize(None) if getattr(f.index, "tz", None) is not None else pd.DatetimeIndex(f.index)
+            out[name] = f[["open", "high", "low", "close"]].astype(float).sort_index()
+            out["_src"] = "export"
+        except Exception:
+            continue
+    return out
+
+
 def mt5_frames(sym):
-    """30-minute, daily and weekly candles straight from MT5 (count-based: no local-time conversion)."""
+    """30-minute, daily and weekly candles straight from MT5 (count-based: no local-time conversion); without MT5,
+    the export files if they are there (B15)."""
     out = {}
     try:
         import MetaTrader5 as mt5
         if not mt5.initialize():
-            return out
+            return _export_frames(sym)
         mt5.symbol_select(sym, True)
         for name, tf, n in (("M30", mt5.TIMEFRAME_M30, 30000), ("D1", mt5.TIMEFRAME_D1, 2500),
                             ("W1", mt5.TIMEFRAME_W1, 700)):
@@ -99,7 +120,7 @@ def mt5_frames(sym):
             out[name] = f[["open", "high", "low", "close"]].astype(float)
     except Exception:
         pass
-    return out
+    return out or _export_frames(sym)
 
 
 def m30_from_1h(df):
@@ -139,7 +160,13 @@ def lot_values():
             if rate:
                 out[a] = units * rate
     except Exception as e:
-        say("   MT5 not reachable (%s) -- the fallback lot table is used" % e)
+        _pj = os.path.join("data", "b15_export", "lot_values.json")   # B15: the export's copy of MT5's answers
+        try:
+            _j = json.load(open(_pj, encoding="utf-8"))
+            out, spreads = dict(_j.get("usd") or {}), dict(_j.get("spreads") or {})
+            say("   MT5 not reachable (%s) -- lot values and spreads from the export %s (%s)" % (e, _pj, _j.get("exported")))
+        except Exception:
+            say("   MT5 not reachable (%s) -- the fallback lot table is used" % e)
     for a in MARKETS:
         out.setdefault(a, FALLBACK_USD[a])
     return out, spreads
@@ -280,7 +307,7 @@ def simulate(e, m30, mp, cost, usd, exits_on, h1=None):
         hi, lo = Hh[k], L[k]
         if (d == 1 and lo <= cur) or (d == -1 and hi >= cur):
             k_end, px = k, cur
-            how = "stop" if not locked else ("lock / staircase stop" if d * (cur - q) >= 0 else "stop")
+            how = "lock / staircase stop" if (locked or steps) and d * (cur - q) >= 0 else "stop"
             break
         if tgt is not None and ((d == 1 and hi >= tgt) or (d == -1 and lo <= tgt)):
             k_end, px, how = k, tgt, "target"
@@ -289,13 +316,14 @@ def simulate(e, m30, mp, cost, usd, exits_on, h1=None):
         if b14x and mp is not None:
             b = mp.bucket(ti[k])
             walls = mp.walls_between(b, d, q, tgt) if tgt is not None else mp.walls_between(b, d, q, None, reach=4.0)
-            if not locked:
+            lock_on, stair_on = bool(f.get("ns_lock_on", True)), bool(f.get("ns_stair_on", True))   # B15 switches
+            if lock_on and not locked:
                 lk = LM.lock_level(walls, d, q)
                 if lk is not None and ((d == 1 and hi >= lk) or (d == -1 and lo <= lk)):
                     locked = True
                     if d * (q - cur) > 0:
                         new = q
-            if locked and (ti[k] + pd.Timedelta(minutes=30)).minute == 0:          # a 1H close
+            if stair_on and (locked or not lock_on) and (ti[k] + pd.Timedelta(minutes=30)).minute == 0:   # a 1H close
                 st_ = LM.stair_step(walls, d, C[k], new if new is not None else cur)
                 if st_ is not None:
                     new, steps = st_, steps + 1
@@ -518,7 +546,7 @@ def main():
         weeks = (df.index[-1] - df.index[0]).total_seconds() / (7 * 86400.0)
         data[a] = dict(df=df, m30=m30, mp=mp, frames=frames, cost=cost, usd=usd[a], weeks=weeks, approx=approx)
         say("%-7s %s | 30m: %s | map: %d 4H candles, %d diagonals%s | spread %.5f%% | $%.4g per 1.0 at the smallest lot" % (
-            a, note, "MT5" if not approx else "APPROXIMATE (made from the hourly file -- MT5 gave none)", mp.n,
+            a, note, ("MT5" if fr.get("_src") != "export" else "the export files") if not approx else "APPROXIMATE (made from the hourly file -- MT5 gave none)", mp.n,
             len(mp.diags), (", left out: " + ", ".join(mp.ma_missing)) if mp.ma_missing else "", 100 * cost, usd[a]))
     if not data:
         say("no market could be loaded -- nothing to test")
@@ -548,25 +576,39 @@ def main():
     if RefEngine is None:
         say("   NOT RUN: tools\\b14_b13ref\\ns_engine.py and ns_package.py are missing")
     elif "R0" in res:
+        # B14.1 (Desire 11 Oct): the package's stop rule changed on purpose (behind the last 1H swing, skipped above
+        # STOP_MAX moves), so package entries are expected to differ from B13's. The identity check is on the ENGINE
+        # entries; the package entries are listed beside it as information.
+        def _split(entries):
+            eng, pk = [], []
+            for e in entries:
+                f = e["proof"]["fields"]
+                (pk if f.get("ns_entry") == "PKG" else eng).append((str(e["proof"]["key"]), f["ns_candle"], round(f["ns_stop"], 8)))
+            return sorted(eng), sorted(pk)
         bad = []
         for a, D in data.items():
             ref_entries, _lg = run_signals(a, D["df"], D["frames"], D["mp"], table["R0"][1]["pc"], eng_cls=RefEngine,
                                            pkg=RefPkg, ref=True)
-            k_ref = sorted((str(e["proof"]["key"]), e["proof"]["fields"]["ns_candle"], round(e["proof"]["fields"]["ns_stop"], 8))
-                           for e in ref_entries)
             r0_entries = sig_cache[json.dumps({"m": a, "pc": NE.rules_stamp(NE.market_settings(a, table["R0"][1]["pc"])),
                                                "pk": table["R0"][1]["pc"].get("b14_knobs"),
                                                "on": table["R0"][1]["pc"].get("b14_rules_enabled")}, sort_keys=True, default=str)][0]
-            k_r0 = sorted((str(e["proof"]["key"]), e["proof"]["fields"]["ns_candle"], round(e["proof"]["fields"]["ns_stop"], 8))
-                          for e in r0_entries)
-            same = k_ref == k_r0
-            say("   %-7s %s  (%d entries B13, %d entries B14 switch off)" % (a, "IDENTICAL" if same else "DIFFERENT", len(k_ref), len(k_r0)))
+            e_ref, p_ref = _split(ref_entries)
+            e_r0, p_r0 = _split(r0_entries)
+            same = e_ref == e_r0
+            kt_ref, kt_r0 = {x[:2] for x in p_ref}, {x[:2] for x in p_r0}
+            n_skip = len(kt_ref - kt_r0)
+            n_closer = sum(1 for x in p_ref if x[:2] in kt_r0 and x not in p_r0)
+            say("   %-7s %s  (engine entries: %d B13, %d B14 switch off | package entries: %d B13, %d B14.1 -- %d not taken, %d with a closer stop)"
+                % (a, "IDENTICAL" if same else "DIFFERENT", len(e_ref), len(e_r0), len(p_ref), len(p_r0), n_skip, n_closer))
             if not same:
                 bad.append(a)
-                for x in sorted(set(k_ref) ^ set(k_r0))[:5]:
-                    say("           only in %s: %s" % ("B13" if x in k_ref else "B14", x))
-        say("   RESULT: %s" % ("PASS -- with the switch off the B14 code trades exactly as B13" if not bad else
-                               "FAIL for %s -- tell Claude before anything is switched on" % ", ".join(bad)))
+                for x in sorted(set(e_ref) ^ set(e_r0))[:5]:
+                    say("           only in %s: %s" % ("B13" if x in e_ref else "B14", x))
+            if len(kt_r0 - kt_ref):
+                say("           package entries only in B14.1 (unexpected): %s" % sorted(kt_r0 - kt_ref)[:3])
+        say("   RESULT: %s" % ("PASS -- with the switch off the B14 code's engine entries are exactly B13's; the package entries differ "
+                               "only by the B14.1 stop rule (a closer stop, or not taken when it would be wider than %g moves)" % NP.STOP_MAX
+                               if not bad else "FAIL for %s -- tell Claude before anything is switched on" % ", ".join(bad)))
     # ---- the table
     say("\n" + "=" * 110 + "\nTHE ROWS (all markets together; %.0f weeks; money = the smallest lot after the spread)\n" % weeks + "=" * 110)
     say("%-4s %-52s %6s %6s %8s %8s %9s %9s" % ("row", "what changes", "trades", "win%", "total R", "$ total", "$ / week", "worst $"))

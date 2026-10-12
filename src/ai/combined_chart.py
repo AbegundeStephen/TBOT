@@ -244,9 +244,16 @@ def _map_layers(mp, band, last):
             continue
         dg = dict(dg, segs=segs)
         lvl_now = dg["v1"] + dg["slope"] * (b + 1 - dg["i1"])
+        # B15 Part 6.1 (3): nothing more than a few 4H moves from price -- a live line by where it is NOW, a broken
+        # one by where it was at its break (the band is last +/- 4 4H moves)
         if dg["broken_at"] is None:
+            if not (lo <= lvl_now <= hi):
+                continue
             keep[dg["d"]].append((abs(lvl_now - last), dg))
         else:
+            lvl_brk = dg["v1"] + dg["slope"] * (dg["broken_at"] - dg["i1"])
+            if not (lo <= lvl_brk <= hi):
+                continue
             brk[dg["d"]].append((-dg["broken_at"], dg))
     diags = []
     for d in (1, -1):
@@ -354,7 +361,8 @@ def _draw_panel(ax, tf, d1, w1, ctx, asset):
             ax.plot([-0.5, xr], [r1, r1], color=COL["r1"], lw=1.2, ls="--", zorder=6)
         if ctx["proofs"]:
             f = ctx["proofs"][-1].get("fields", {})
-            half = pd.Timedelta(minutes=15 if f.get("ns_entry") == "PKG" else 30)
+            half = pd.Timedelta(minutes=120 if f.get("ns_clock") == "4H" else      # B15: a 4H close
+                                15 if f.get("ns_entry") == "PKG" else 30)
             for tk, pk, lab, col in (("ns_b_t", "ns_b_px", "B", COL["r2"]), ("ns_touch_t", "ns_touch_px", "R", "#6a1b9a"),
                                      ("ns_candle", "ns_close", "E", "black")):
                 try:

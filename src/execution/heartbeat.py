@@ -641,8 +641,11 @@ class HeartbeatMonitor:
                 continue
             if a is not None and self._is_market_closed(a):   # B11: check at the market's first open cycle
                 continue
-            if not any(ts <= fts <= ts + within * 60 and (a is None or self._asset_of(fm_) == a)
-                       for fts, fm_ in fol):
+            # B15 (Desire 12 Oct, Part 3): "after_only" -- the follow-up must come AFTER the trigger line, for a check
+            # whose follow-up pattern also matches the trigger itself ("each 4H progress line is followed by the
+            # next one"). Off for every other check, which keep exactly the old test.
+            if not any((ts < fts if p.get("after_only") else ts <= fts) and fts <= ts + within * 60
+                       and (a is None or self._asset_of(fm_) == a) for fts, fm_ in fol):
                 missing.append(a or "?")
         if missing:
             return False, (f"{p['trigger']} -> {p['tag']}: no follow-up within {within:.0f} min "

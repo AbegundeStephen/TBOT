@@ -587,6 +587,10 @@ class VeteranTradeManager:
         self.ns_target_kind = _cs.get("ns_target_kind")
         self.ns_lock_done  = False
         self.ns_stair_t    = None          # the 1H close the staircase last stepped on
+        # B15 (Desire 12 Oct): the lock and the staircase switch separately. B15 = no lock, the staircase from the entry.
+        # A trade made under B14 (no such fields) keeps B14's behaviour: the lock first, then the staircase.
+        self.ns_lock_on    = bool(_cs.get("ns_lock_on", True))
+        self.ns_stair_on   = bool(_cs.get("ns_stair_on", True))
         self._ns_hour      = None          # (close time, close) of the newest 1H candle, fed by main.py's trade loop
         self._ns_walls_key = None
         self._ns_walls     = []
@@ -1336,6 +1340,8 @@ class VeteranTradeManager:
                   itself). One lock per trade.
           staircase -- after the lock, each 1H close beyond a big wall's sphere moves the stop to that sphere's near
                   edge (just behind the wall). The stop never moves back (_propose_stop is tighten-only).
+          B15 (Desire 12 Oct): each one has its own switch on the trade (ns_lock_on / ns_stair_on). With the lock off
+                  the staircase works from the entry.
         The walls come from the market's newest line map (line_map.py), the same map the entry was judged on."""
         try:
             from src.execution import line_map as _LM
@@ -1359,7 +1365,7 @@ class VeteranTradeManager:
                 self._ns_walls = mp.walls_between(b, d, entry, tgt) if tgt is not None else \
                     mp.walls_between(b, d, entry, None, reach=4.0)
             walls = self._ns_walls
-            if not self.ns_lock_done:
+            if self.ns_lock_on and not self.ns_lock_done:
                 lk = _LM.lock_level(walls, d, entry)
                 if lk is not None and d * (float(price) - lk) >= 0:
                     self.ns_lock_done = True
@@ -1368,7 +1374,8 @@ class VeteranTradeManager:
                                 "%.5g) -- stop %s", self.asset, self.side, float(price), lk, walls[0]["label"],
                                 walls[0]["near"], ("moved to the entry %.5g" % entry) if _ok else
                                 "already at or past the entry")
-            if self.ns_lock_done and self._ns_hour is not None and self._ns_hour[0] != self.ns_stair_t:
+            if self.ns_stair_on and (self.ns_lock_done or not self.ns_lock_on) and self._ns_hour is not None \
+                    and self._ns_hour[0] != self.ns_stair_t:
                 t_h, c_h = self._ns_hour
                 self.ns_stair_t = t_h
                 cur = float(self.current_stop_loss) if self.current_stop_loss is not None else entry
@@ -4261,6 +4268,7 @@ class VeteranTradeManager:
             # B14 section 6: the lock and the staircase survive a restart
             "ns_b14": getattr(self, "ns_b14", False), "ns_target_kind": getattr(self, "ns_target_kind", None),
             "ns_lock_done": getattr(self, "ns_lock_done", False), "ns_stair_t": getattr(self, "ns_stair_t", None),
+            "ns_lock_on": getattr(self, "ns_lock_on", True), "ns_stair_on": getattr(self, "ns_stair_on", True),   # B15
         }
 
     @classmethod
@@ -4314,6 +4322,8 @@ class VeteranTradeManager:
         vtm.ns_target_kind = state.get("ns_target_kind")
         vtm.ns_lock_done = bool(state.get("ns_lock_done", False))
         vtm.ns_stair_t = state.get("ns_stair_t")
+        vtm.ns_lock_on = bool(state.get("ns_lock_on", True))           # B15: a B14 trade keeps the lock
+        vtm.ns_stair_on = bool(state.get("ns_stair_on", True))
         vtm._time_stop_extended = state.get("_time_stop_extended", False)
         vtm._counter_momentum_cut = state.get("_counter_momentum_cut", False)
         return vtm

@@ -14,6 +14,7 @@ BRAIN_COL = {"MAIN_UP": "#2e7d32", "NATURAL_RETRACEMENT": "#c0ca33", "SECONDARY_
              "MAIN_DOWN": "#c62828", "NATURAL_REBOUND": "#4dd0e1", "SECONDARY_REBOUND": "#8e24aa"}
 STYLE = {"B": "break", "E": "retest", "E2": "pause-then-turn", "PKG": "package"}   # B13 item 7: package entries
 STAGE = {0: "waiting for a CLEAR 4H close past R2", 1: "broken -- waiting for the retest", 2: "retested -- waiting for the trigger"}
+STAGE4 = {1: "broken -- on the 4H clock, waiting for the 4H retest", 2: "4H retest done -- waiting for a 4H close past the peak"}   # B15
 _LSM = {}
 
 
@@ -137,7 +138,10 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
         tgt = f.get("ns_target")
         tgt = None if tgt in (None, "None") else float(tgt)
         _pkg = f.get("ns_entry") == "PKG"                       # B13 item 7: a package entry is a 30m close
-        if _pkg:
+        _c4 = f.get("ns_clock") == "4H"                         # B15: a 4H-clock entry is a 4H close
+        if _c4:
+            ctr_e = lambda t_close: t_close - pd.Timedelta(hours=2)
+        elif _pkg:
             ctr_e = lambda t_close: t_close - pd.Timedelta(minutes=15)
         else:
             ctr_e = ctr
@@ -175,10 +179,11 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
     if what == "proof":
         title = "%s %s  -  %s entry  -  %s   (%sentry candle closed %s UTC)" % (
             asset, side, STYLE.get(f.get("ns_entry"), f.get("ns_entry")), f.get("ns_kind_raw", ""),
-            "30m " if f.get("ns_entry") == "PKG" else "1H ", str(te)[:16])
+            "4H " if f.get("ns_clock") == "4H" else "30m " if f.get("ns_entry") == "PKG" else "1H ", str(te)[:16])
     elif what == "setup":
         title = "%s  -  watching setup #%s: %s %s  -  %s" % (asset, obj.get("id"), side, obj.get("kind", ""),
-                                                             STAGE.get(int(obj.get("stage", 0)), ""))
+                                                             (STAGE4 if obj.get("clock") == "4H" else STAGE).get(
+                                                                 int(obj.get("stage", 0)), ""))
     else:
         title = "%s  -  no live setup" % asset
     fig.suptitle(title, x=0.05, y=0.955, ha="left", fontsize=15)
@@ -212,7 +217,20 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
             lines.append("           %s the wick" % ("CLEARED" if d * (float(bpx) - edge) > 0 else "inside"))
         lines.append(("R  retest  %s  %.6g" % (str(tt)[:16], float(f["ns_touch_px"]))) if tt is not None and f.get("ns_touch_px") not in (None, "None")
                      else "R  retest  - (break entry: no retest needed)" if f.get("ns_entry") == "B" else "R  retest  -")
-        if f.get("ns_entry") == "PKG":                                    # B13 item 7: say plainly what the package did
+        if f.get("ns_path"):                                              # B15 Part 3: the path this signal took
+            lines.append("PATH     %s" % str(f.get("ns_path"))[:100])
+            if f.get("ns_phase_4h"):
+                lines.append("           4H brain at the break: %s" % f.get("ns_phase_4h"))
+        if f.get("ns_clock") == "4H":                                     # B15: a 4H-clock entry, said plainly
+            _g6 = (lambda _v: ("%.6g" % float(_v)) if _v not in (None, "None", "") else "-")
+            lines += ["4H CLOCK  waited %sh after the break: a 4H retest, then a 4H close past the peak %s" % (
+                          f.get("pkg_wait_h"), _g6(f.get("brc_h2")))]
+            if f.get("pkg_bigger") not in (None, "None", ""):
+                lines.append("           the entry close had to clear the old %s %s (W) too" % (
+                    "high" if d == 1 else "low", _g6(f.get("pkg_bigger"))))
+            if f.get("ns_stop_rule"):
+                lines.append("           stop: %s" % str(f.get("ns_stop_rule"))[:90])
+        elif f.get("ns_entry") == "PKG":                                  # B13 item 7: say plainly what the package did
             _far = f.get("pkg_route") == "far"
             _g6 = (lambda _v: ("%.6g" % float(_v)) if _v not in (None, "None", "") else "-")
             _why14 = str(f.get("ns_route") or "").replace("package: ", "") if f.get("ns_b14") else None
@@ -223,7 +241,8 @@ def render(asset, df1, what, obj, out_png, now=None, margin_atr=None, risk_text=
                       ("           stop behind the last 30m higher low (far-entry rule)" if _far else
                        "           the closes had to clear %s (W)" % _g6(f.get("pkg_bigger"))),
                       "           bigger timeframes: %s" % (f.get("pkg_majority") or "-")]
-        lines += ["%s  entry   %s  %sclose %.6g" % ("E", str(te)[:16], "30m " if f.get("ns_entry") == "PKG" else "1H ", e), "",
+        lines += ["%s  entry   %s  %sclose %.6g" % ("E", str(te)[:16], "4H " if f.get("ns_clock") == "4H" else
+                                                   "30m " if f.get("ns_entry") == "PKG" else "1H ", e), "",
                   "S  stop    %.6g" % stop,
                   "T  target  %s   reward:risk %.2f" % (("%.6g" % tgt) if tgt is not None else "runner (trailed)", rr), "",
                   risk_text or "REAL RISK  (not known yet -- drawn before the order)", "",
