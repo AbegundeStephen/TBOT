@@ -952,10 +952,7 @@
     <div class="topbar-nav">
         <span id="last-update" style="font-size:11px;color:var(--muted);font-family:var(--font-mono);"></span>
 
-        <a href="/debrief" class="tb-btn"><span>🎬</span><span>Debrief</span></a>
-
         <button class="tb-btn" id="logs-btn"><span>💻</span><span>Logs</span></button>
-        <button class="tb-btn" id="audit-btn"><span>📋</span><span>Audit</span></button>
 
         <div class="dropdown">
             <button class="tb-btn" id="docs-btn"><span>📚</span><span>Docs ▾</span></button>
@@ -985,7 +982,6 @@
         <button class="sidebar-item" data-tab="charts"><span class="sidebar-icon">🖼️</span>Charts</button>
         <button class="sidebar-item" data-tab="backtest"><span class="sidebar-icon">🧪</span>Backtest</button>
         <button class="sidebar-item" data-tab="data"><span class="sidebar-icon">📊</span>Data</button>
-        <button class="sidebar-item" data-tab="funnel"><span class="sidebar-icon">🔻</span>Funnel</button>
         <button class="sidebar-item" data-tab="shadow"><span class="sidebar-icon">🟣</span>Shadow Intel</button>
         <button class="sidebar-item" data-tab="control"><span class="sidebar-icon">🎛</span>Control</button>
         <button class="sidebar-item" data-tab="config"><span class="sidebar-icon">⚙️</span>Config</button>
@@ -1339,7 +1335,6 @@
                 </div>
             </div>
 
-            <!-- Funnel -->
             <!-- Market Scanner -->
             <div class="tab-panel" id="tab-scanner">
                 <div class="shadow-header">
@@ -1362,24 +1357,6 @@
                     <button class="mode-btn" data-scanfilter="blocked" onclick="setScannerFilter('blocked')">Blocked <span id="scan-count-blocked">0</span></button>
                 </div>
                 <div id="scanner-content">
-                    <div class="spinner-wrap"><div class="spinner"></div></div>
-                </div>
-            </div>
-
-            <div class="tab-panel" id="tab-funnel">
-                <div class="shadow-header">
-                    <span class="shadow-title" style="color:var(--accent2);">🔻 Signal Funnel</span>
-                    <div style="display:flex;align-items:center;gap:10px;">
-                        <select class="filter-select" id="funnel-days" onchange="loadFunnelSection()">
-                            <option value="1">Today</option>
-                            <option value="3">Last 3 days</option>
-                            <option value="7">Last 7 days</option>
-                            <option value="30">Last 30 days</option>
-                        </select>
-                        <span class="shadow-meta" id="funnel-meta">—</span>
-                    </div>
-                </div>
-                <div id="funnel-content">
                     <div class="spinner-wrap"><div class="spinner"></div></div>
                 </div>
             </div>
@@ -1543,7 +1520,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupModal();
     setupDropdown();
     document.getElementById('logs-btn').addEventListener('click', () => showLogs('bot'));
-    document.getElementById('audit-btn').addEventListener('click', () => showAudit());
 
     await loadAll();
     setInterval(loadAll, 30000);
@@ -2699,7 +2675,7 @@ async function showLogs(type='bot') {
 }
 
 // ────────────────────────────────────────────────────────────
-// AUDIT MODAL — card-based trade log
+// TRADE CARD HELPERS — shared by the Logs modal's TRADE_EVENT rendering
 // ────────────────────────────────────────────────────────────
 const ASSET_ICONS = {
     BTC:'₿', GOLD:'🥇', USTEC:'📊', EURUSD:'💱', EURJPY:'💱', USOIL:'🛢', GBPAUD:'💱',
@@ -2732,64 +2708,6 @@ function evtClass(ev) {
 function evtLabel(ev) {
     const labels = {SL_HIT:'SL Hit', TP_HIT:'TP Hit', PARTIAL_EXIT:'Partial', BREAKEVEN:'Break Even', SCALE_OUT:'Scale Out'};
     return labels[ev] || ev;
-}
-
-let _auditAll = [];
-let _auditFilter = 'ALL';
-
-async function showAudit() {
-    document.getElementById('modal-title').textContent = '📋 Trade Audit Log';
-    document.getElementById('modal-body').innerHTML = '<div class="spinner-wrap"><div class="spinner"></div></div>';
-    document.getElementById('main-modal').classList.add('show');
-    try {
-        const d = await fetchJSON(`${API}/api/audit?limit=500`);
-        if (d.error) throw new Error(d.error);
-        _auditAll = d.events || [];
-        _auditFilter = 'ALL';
-        renderAuditModal();
-    } catch(e) {
-        document.getElementById('modal-body').innerHTML = `<div style="color:var(--red2);padding:20px;">Error: ${e.message}</div>`;
-    }
-}
-
-function renderAuditModal() {
-    const events = _auditAll;
-    // Compute summary stats (only closed events)
-    const closed   = events.filter(e => ['SL_HIT','TP_HIT','EXIT','PARTIAL_EXIT'].includes(e.event));
-    const wins     = closed.filter(e => (e.pnl||0) > 0).length;
-    const losses   = closed.filter(e => (e.pnl||0) < 0).length;
-    const winRate  = closed.length ? Math.round(wins / closed.length * 100) : 0;
-    const totalPnl = closed.reduce((s,e) => s + (e.pnl||0), 0);
-    const entries  = events.filter(e => e.event === 'ENTRY').length;
-
-    // Filter types present
-    const types = ['ALL', ...new Set(events.map(e => e.event).filter(Boolean))];
-
-    // Apply filter
-    const visible = _auditFilter === 'ALL' ? events : events.filter(e => e.event === _auditFilter);
-
-    const statsHtml = `
-        <div class="audit-summary">
-            <div class="audit-sum-item"><div class="audit-sum-val">${entries}</div><div class="audit-sum-lbl">Entries</div></div>
-            <div class="audit-sum-item"><div class="audit-sum-val ${totalPnl>=0?'pos':'neg'}">${totalPnl>=0?'+':''}$${Math.abs(totalPnl).toFixed(2)}</div><div class="audit-sum-lbl">Net P&L</div></div>
-            <div class="audit-sum-item"><div class="audit-sum-val ${winRate>=50?'pos':'neg'}">${winRate}%</div><div class="audit-sum-lbl">Win Rate</div></div>
-            <div class="audit-sum-item"><div class="audit-sum-val">${wins}W / ${losses}L</div><div class="audit-sum-lbl">Results</div></div>
-        </div>`;
-
-    const filterHtml = `<div class="audit-filters">
-        ${types.map(t => `<button class="af-btn ${_auditFilter===t?'af-active':''}" onclick="_auditFilter='${t}';renderAuditModal()">${t==='ALL'?'All':evtLabel(t)}</button>`).join('')}
-        <button onclick="showAudit()" class="af-btn" style="margin-left:4px;">🔄</button>
-    </div>`;
-
-    const cardsHtml = visible.length === 0
-        ? `<div style="text-align:center;padding:40px;color:var(--muted);">No events</div>`
-        : visible.map(ev => tradeCard(ev)).join('');
-
-    document.getElementById('modal-body').innerHTML = `
-        <div class="audit-wrap">
-            <div class="audit-topbar">${statsHtml}${filterHtml}</div>
-            <div class="audit-cards">${cardsHtml}</div>
-        </div>`;
 }
 
 function tradeCard(ev) {
@@ -2872,7 +2790,6 @@ function setupTabs() {
             if (btn.dataset.tab === 'livermore') loadLivermoreSection();
             if (btn.dataset.tab === 'scanner')   loadScannerSection();
             if (btn.dataset.tab === 'charts')    loadChartsSection();
-            if (btn.dataset.tab === 'funnel')    loadFunnelSection();
             if (btn.dataset.tab === 'backtest')  loadBacktestSection();
             if (btn.dataset.tab === 'data')      loadDataSection();
         });
@@ -4231,80 +4148,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 15000);
 });
-
-// ────────────────────────────────────────────────────────────
-// SIGNAL FUNNEL
-// ────────────────────────────────────────────────────────────
-async function loadFunnelSection() {
-    const el = document.getElementById('funnel-content');
-    const days = document.getElementById('funnel-days').value;
-    try {
-        const d = await fetchJSON(API + '/api/funnel?days=' + days);
-        document.getElementById('funnel-meta').textContent =
-            d.available ? `${Object.keys(d.assets).length} assets` : 'no data yet';
-        if (!d.available) {
-            el.innerHTML = emptyState('🔻', 'No funnel data yet for this window — appears once the bot has evaluated signals');
-            return;
-        }
-        renderFunnel(d);
-    } catch (e) {
-        el.innerHTML = emptyState('🔻', 'Could not load funnel data');
-    }
-}
-
-function funnelVetoLabel(key) {
-    return key.replace(/^blocked_/, '').replace(/_/g, ' ');
-}
-
-function renderFunnel(d) {
-    const el = document.getElementById('funnel-content');
-    const assets = Object.entries(d.assets).sort((a, b) => b[1].evaluations - a[1].evaluations);
-
-    let h = '<div style="overflow-x:auto;"><table class="data-table"><thead><tr>' +
-        '<th>Asset</th><th>Evaluations</th><th>Raw Signal</th><th>No Setup</th>' +
-        '<th>Top Block</th><th>Passed</th><th>Executed</th></tr></thead><tbody>';
-    for (const [asset, c] of assets) {
-        const blocks = Object.entries(c.blocked || {}).filter(([k]) => k !== 'no_raw_signal');
-        const top = blocks.length ? blocks[0] : null;
-        const noSetup = (c.blocked || {}).no_raw_signal || 0;
-        h += `<tr>
-            <td style="font-weight:700;">${esc(asset)}</td>
-            <td>${c.evaluations}</td>
-            <td>${c.raw_signal} <span style="color:var(--muted);font-size:11px;">(${_fnPct(c.raw_signal, c.evaluations)})</span></td>
-            <td>${noSetup} <span style="color:var(--muted);font-size:11px;">(${_fnPct(noSetup, c.evaluations)})</span></td>
-            <td>${top ? esc(funnelVetoLabel(top[0])) + ' ×' + top[1] : '—'}</td>
-            <td>${c.passed_to_execution}</td>
-            <td class="${c.executed > 0 ? 'pos' : ''}">${c.executed}</td>
-        </tr>`;
-    }
-    h += '</tbody></table></div>';
-
-    // Veto families ranked across all assets -- same bar pattern as the
-    // Gate Scorecard mini-card, so the two "what's blocking trades" views
-    // on this dashboard read consistently.
-    const vetoes = Object.entries(d.veto_totals || {});
-    if (vetoes.length) {
-        const maxV = Math.max(...vetoes.map(([, v]) => v));
-        h += '<div style="padding:14px;border-top:1px solid var(--border);">' +
-             '<div class="card-title" style="margin-bottom:10px;">Veto families ranked (most blocking first)</div>';
-        vetoes.slice(0, 10).forEach(([k, v]) => {
-            const pct = maxV ? Math.round(v / maxV * 100) : 0;
-            const isNoSetup = k === 'no_raw_signal';
-            h += `<div class="score-row" style="border-bottom:none;padding:6px 0;">
-                <div class="score-header">
-                    <span class="score-name">${esc(funnelVetoLabel(k))}</span>
-                    <span class="score-meta">${v}</span>
-                </div>
-                <div class="score-bar-bg"><div class="score-bar-fill" style="background:${isNoSetup ? 'var(--muted)' : 'var(--accent)'};width:${pct}%;"></div></div>
-            </div>`;
-        });
-        h += '</div>';
-    }
-
-    el.innerHTML = h;
-}
-
-function _fnPct(n, d) { return d ? Math.round(n / d * 100) + '%' : '—'; }
 
 // ── Downloads tab ────────────────────────────────────────────────────────────
 function dlUpdateUI() {
