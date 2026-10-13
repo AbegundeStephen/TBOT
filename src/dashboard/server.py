@@ -15,6 +15,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
+import httpx
 import logging
 
 current_dir = os.path.dirname(os.path.abspath(__file__))  # src/dashboard
@@ -89,6 +90,37 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "YOUR_SUPABASE_KEY")
 
 # Initialize Supabase client
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Harden the REST client's HTTP session against transient connection drops.
+# Observed repeatedly in production: every endpoint on this page fires its
+# own Supabase call on each ~30s poll, all multiplexed over one shared
+# HTTP/2 connection (supabase-py keeps one httpx.Client for the process
+# lifetime). When Supabase's side silently closes that connection between
+# polls (idle timeout upstream of the client), the *next* request to reuse
+# it fails outright -- seen as "ConnectionTerminated", "Server disconnected"
+# or "EOF occurred in violation of protocol (_ssl.c:2406)" on ~10-20s bursts
+# across every endpoint at once, self-resolving on the following poll once
+# a fresh connection is opened. httpx's transport-level retries handle
+# exactly this case safely (only retries when no request bytes were sent
+# on the dead connection yet), so this needs no changes to the 15+
+# individual route handlers below.
+try:
+    _sb_session = supabase.postgrest.session
+    supabase.postgrest.session = httpx.Client(
+        base_url=_sb_session.base_url,
+        headers=_sb_session.headers,
+        timeout=_sb_session.timeout,
+        follow_redirects=True,
+        http2=True,
+        transport=httpx.HTTPTransport(http2=True, retries=1),
+    )
+    _sb_session.close()
+except Exception as _sb_harden_err:
+    logger.warning(
+        f"[SUPABASE] Could not harden HTTP client against transient disconnects "
+        f"(falling back to the default, un-retried client): {_sb_harden_err}"
+    )
+
 # Initialize DB Manager (For Analysis Tools)
 db_manager = TradingDatabaseManager(SUPABASE_URL, SUPABASE_KEY)
 
