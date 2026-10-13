@@ -8582,7 +8582,12 @@ class TradingBot:
                         signal=signal,
                         signal_quality=details.get("signal_quality", 0),
                         regime=details.get("regime", "UNKNOWN"),
-                        regime_confidence=details.get("regime_confidence", 0),
+                        # Several of the council's early-exit dicts set "regime" without
+                        # "regime_confidence" -- mtf_regime's own confidence (the same
+                        # abs(regime_score) the dashboard's Overview cards already show
+                        # correctly) is computed unconditionally, so it's always a safe,
+                        # consistent fallback rather than a silent 0.
+                        regime_confidence=details.get("regime_confidence") if details.get("regime_confidence") is not None else mtf_regime.get("confidence", 0),
                         mr_signal=details.get("mr_signal", 0),
                         mr_confidence=details.get("mr_confidence", 0),
                         tf_signal=details.get("tf_signal", 0),
@@ -9280,7 +9285,7 @@ class TradingBot:
                             signal=signal,
                             signal_quality=details.get("signal_quality", 0),
                             regime=details.get("regime", "UNKNOWN"),
-                            regime_confidence=details.get("regime_confidence", 0),
+                            regime_confidence=details.get("regime_confidence") if details.get("regime_confidence") is not None else mtf_regime.get("confidence", 0),
                             mr_signal=details.get("mr_signal", 0),
                             mr_confidence=details.get("mr_confidence", 0),
                             tf_signal=details.get("tf_signal", 0),
@@ -9999,7 +10004,7 @@ class TradingBot:
                     signal=signal,
                     signal_quality=details.get("signal_quality", 0),
                     regime=details.get("regime", "UNKNOWN"),
-                    regime_confidence=details.get("regime_confidence", 0),
+                    regime_confidence=details.get("regime_confidence") if details.get("regime_confidence") is not None else mtf_regime.get("confidence", 0),
                     mr_signal=details.get("mr_signal", 0),
                     mr_confidence=details.get("mr_confidence", 0),
                     tf_signal=details.get("tf_signal", 0),
