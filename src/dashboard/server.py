@@ -1516,13 +1516,20 @@ def health_check():
 
         last_activity = snapshot.data[0]["timestamp"] if snapshot.data else None
 
-        # Determine if bot is active (activity in last 10 minutes)
+        # Determine if bot is active. A portfolio snapshot is only taken once
+        # per run_trading_cycle(), which since B14's 3.1 (looks on every
+        # 30-minute candle close, not a continuous ~5-min loop) now fires
+        # once per 30 minutes instead of every ~5 -- the old 600s (10 min)
+        # threshold made this show OFFLINE for most of every cycle even on a
+        # perfectly healthy bot. 2100s (35 min) matches the same "just over
+        # one look" margin B14 already uses for this exact reason
+        # (health_monitor.py's own HEARTBEAT_MAX_S).
         is_active = False
         if last_activity:
             last_time = datetime.fromisoformat(last_activity.replace("Z", "+00:00"))
             is_active = (
                 datetime.now(last_time.tzinfo) - last_time
-            ).total_seconds() < 600
+            ).total_seconds() < 2100
 
         return jsonify(
             {
