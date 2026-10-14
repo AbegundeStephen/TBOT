@@ -2483,6 +2483,22 @@ function getSignalOutcome(s) {
     return { cls:'outcome-hold', text:'⚪ No proof' };
 }
 
+// Desire 14 Oct: shared staged break/retest/close-through renderer for the
+// Proof column -- stages is [label, price, done][]; rows with no known price
+// are skipped (e.g. close-through before a setup's first break is recorded).
+function renderProofStages(stages, kindLabel) {
+    let html = '<div style="font-size:10px;line-height:1.6;">';
+    for (const [label, price, done] of stages) {
+        if (price == null) continue;
+        const val = Number(price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:5});
+        html += done
+            ? `<div><span style="color:var(--green);">✓</span> ${label}: <span style="font-family:var(--font-mono);">${val}</span></div>`
+            : `<div style="color:var(--muted);">⏳ awaiting ${label.toLowerCase()} <span style="font-family:var(--font-mono);">(${val})</span></div>`;
+    }
+    html += `<div style="color:var(--muted2);">${esc(kindLabel||'')}</div></div>`;
+    return html;
+}
+
 function renderSignalsTable(signals, container) {
     if (!signals?.length) { container.innerHTML = emptyState('📡','No signals found'); return; }
     let h = '<div style="overflow-x:auto;"><table class="data-table" style="min-width:1000px;"><thead><tr>';
@@ -2500,28 +2516,32 @@ function renderSignalsTable(signals, container) {
             ? `<div style="font-size:11px;">${esc(lsm1h||'—')}</div><div style="font-size:10px;color:var(--muted);">4H: ${esc(lsm4h||'—')}</div>`
             : '<span style="color:var(--muted);">—</span>';
         // Desire 14 Oct: staged break/retest/close-through prices, not just the
-        // raw entry-style code. A "B" (break-style) proof only ever confirms
-        // the break -- retest/close-through are the setup's known levels but
-        // haven't happened yet, so they're labelled "awaiting"; any other style
-        // ("E"/"PKG") has already passed all three by the time it fires.
+        // raw entry-style code or kind label. Two sources, same rendering:
+        // a proof that confirmed THIS cycle (meta.ns_entry) -- a "B" (break-
+        // style) proof only ever confirms the break, so retest/close-through
+        // are labelled "awaiting"; any other style ("E"/"PKG") has already
+        // passed all three -- or, failing that, the single most-advanced
+        // still-pending setup (meta.ns_pending_setup) for a plain HOLD with
+        // no proof yet, staged by its stage number (0/1/2) instead.
         const proofCell = (() => {
-            if (!meta?.ns_entry) return '<span style="color:var(--muted);">—</span>';
-            const breakOnly = meta.ns_entry === 'B';
-            const stages = [
-                ['Break', meta.ns_r2, true],
-                ['Retest', meta.ns_edge, !breakOnly],
-                ['Close through', meta.ns_h2, !breakOnly],
-            ];
-            let html = '<div style="font-size:10px;line-height:1.6;">';
-            for (const [label, price, done] of stages) {
-                if (price == null) continue;
-                const val = Number(price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:5});
-                html += done
-                    ? `<div><span style="color:var(--green);">✓</span> ${label}: <span style="font-family:var(--font-mono);">${val}</span></div>`
-                    : `<div style="color:var(--muted);">⏳ awaiting ${label.toLowerCase()} <span style="font-family:var(--font-mono);">(${val})</span></div>`;
+            if (meta?.ns_entry) {
+                const breakOnly = meta.ns_entry === 'B';
+                return renderProofStages([
+                    ['Break', meta.ns_r2, true],
+                    ['Retest', meta.ns_edge, !breakOnly],
+                    ['Close through', meta.ns_h2, !breakOnly],
+                ], meta.ns_kind);
             }
-            html += `<div style="color:var(--muted2);">${esc(meta.ns_kind||'')}</div></div>`;
-            return html;
+            const p = meta?.ns_pending_setup;
+            if (p && p.r2 != null) {
+                const stage = p.stage || 0;
+                return renderProofStages([
+                    ['Break', p.r2, stage >= 1],
+                    ['Retest', p.edge, stage >= 2],
+                    ['Close through', p.h2, false],
+                ], p.kind);
+            }
+            return '<span style="color:var(--muted);">—</span>';
         })();
         const councilCell = (meta?.total_score!=null && meta?.required_score!=null)
             ? `<span style="font-family:var(--font-mono);font-size:11px;">${Number(meta.total_score).toFixed(2)}/${Number(meta.required_score).toFixed(2)}</span>`

@@ -3155,8 +3155,42 @@ class TradingBot:
             "ns_r2": self._cs_field(details, "ns_r2"),
             "ns_edge": self._cs_field(details, "ns_edge"),
             "ns_h2": self._cs_field(details, "ns_h2"),
+            # Desire 14 Oct (follow-up): when no proof confirmed THIS cycle (a
+            # plain HOLD, the common case), still surface the single most-
+            # advanced pending setup's stage/levels -- same data and same
+            # "pick one" rule the Scanner page already uses (_head_fields:
+            # highest stage, tie-broken by most recent confirmation), so the
+            # Proof column isn't blank just because nothing fired yet. Picked
+            # server-side and trimmed to the few fields the dashboard needs,
+            # rather than handing the frontend composite_state's full raw
+            # ns_setups list (internal engine fields, unbounded per cycle).
+            "ns_pending_setup": self._ns_pending_setup(details),
             "livermore_state_1h": self._cs_field(details, "livermore_state_1h"),
             "livermore_state_4h": self._cs_field(details, "livermore_state_4h"),
+        }
+
+    def _ns_pending_setup(self, details):
+        """Desire 14 Oct (follow-up): the top live/pending NS setup for this asset
+        this cycle, trimmed to what the dashboard's Proof column needs. None when
+        a proof already confirmed this cycle (ns_entry set -- that takes priority
+        and is rendered from the ns_r2/ns_edge/ns_h2 fields instead) or when there
+        are no live setups at all."""
+        if self._cs_field(details, "ns_entry") is not None:
+            return None
+        setups = self._cs_field(details, "ns_setups") or []
+        if not setups:
+            return None
+        try:
+            top = sorted(setups, key=lambda x: (x.get("stage", 0) or 0, str(x.get("conf", ""))))[-1]
+        except Exception:
+            return None
+        return {
+            "stage": top.get("stage"),
+            "d": top.get("d"),
+            "kind": top.get("kind"),
+            "r2": top.get("r2"),
+            "edge": top.get("edge"),
+            "h2": top.get("h2"),
         }
 
     def _resolve_generic_gate_id(self, *, block_source: str = "", reasoning: str = "", block_reason: str = ""):
