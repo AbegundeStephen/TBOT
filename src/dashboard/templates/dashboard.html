@@ -3235,6 +3235,14 @@ document.addEventListener('DOMContentLoaded', () => {
 const SCANNER_STAGE_LABEL = {0: 'waiting for the break', 1: 'waiting for the retest', 2: 'waiting for the trigger'};
 const SCANNER_NEXT_LABEL  = {break: 'to break', retest: 'to retest', trigger: 'to trigger'};
 const SCANNER_NEAR_ATR = 1.0;   // "near a signal" threshold: within 1 ATR of its next stage
+// "Blocked" freshness window: an asset only counts as currently blocked if its
+// most recent informative funnel entry is within ~1.5 bot cycles (B14's 30min
+// look cadence). Without this, one old block (e.g. a stale-price event that
+// resolved hours ago) stays the "top" entry forever once logged -- nothing
+// displaces it since routine no_raw_signal holds are filtered out of /recent
+// -- so a healthy, idle market (no setup yet, nothing wrong) shows as
+// permanently BLOCKED right alongside genuinely stuck ones.
+const SCANNER_BLOCK_STALE_MIN = 45;
 let scannerFilter = 'all';
 let scannerMarkets = null;   // last-fetched data, so filter clicks don't refetch
 
@@ -3283,7 +3291,12 @@ function scannerFmtAge(hr) {
 function scannerIsBlocked(m) {
     if (m.paused) return true;
     const top = (m.recent || [])[0];
-    return !!top && top.stage !== 'no_raw_signal' && top.stage !== 'executed';
+    if (!top || top.stage === 'no_raw_signal' || top.stage === 'executed') return false;
+    if (top.ts) {
+        const ageMin = (Date.now() - new Date(top.ts).getTime()) / 60000;
+        if (ageMin > SCANNER_BLOCK_STALE_MIN) return false;
+    }
+    return true;
 }
 
 function scannerIsNear(m) {
