@@ -7499,7 +7499,16 @@ class TradingBot:
                 # Surface the composite_state the aggregator already built
                 # internally, so the validator, VTM tick loop, and council
                 # exemption logic can all see it on this and later cycles.
-                mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
+                _perf_cs = getattr(aggregator, "_cached_composite", None)
+                mtf_regime["composite_state"] = _perf_cs
+                # Also surface it on `details` (dict form, matching the council
+                # branch's `.to_dict()`) -- previously only `mtf_regime` got it,
+                # so `_signal_meta()` / the dashboard's Proof column (ns_entry/
+                # ns_kind, read via details.get("composite_state")) stayed
+                # silently blank for every performance-mode asset even though
+                # the NS-engine state existed the whole time.
+                if _perf_cs is not None and hasattr(_perf_cs, "to_dict"):
+                    details["composite_state"] = _perf_cs.to_dict()
                 # Brain Rebuild Part 3.2 prerequisite (see council branch above).
                 details["structure_levels_ref"] = getattr(aggregator, "_structure_levels", {}).get(asset_name, [])
                 details["aggregator_mode"] = (
@@ -9884,7 +9893,12 @@ class TradingBot:
                     )
                     # Surface the composite_state the aggregator already built
                     # internally (mirrors the injection done for Location A/B).
-                    mtf_regime["composite_state"] = getattr(aggregator, "_cached_composite", None)
+                    _perf_cs2 = getattr(aggregator, "_cached_composite", None)
+                    mtf_regime["composite_state"] = _perf_cs2
+                    # Also surface it on `details` -- see Location A/B's matching
+                    # fix for why this was silently missing for performance mode.
+                    if _perf_cs2 is not None and hasattr(_perf_cs2, "to_dict"):
+                        details["composite_state"] = _perf_cs2.to_dict()
                     # Brain Rebuild Part 3.2 prerequisite (mirrors Location A).
                     details["structure_levels_ref"] = getattr(aggregator, "_structure_levels", {}).get(asset_name, [])
                     details["aggregator_mode"] = "performance"
