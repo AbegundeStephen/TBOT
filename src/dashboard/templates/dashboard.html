@@ -1913,13 +1913,23 @@ async function loadClosedTrades() {
             const maeR = meta && meta.mae_r != null ? meta.mae_r : null;
             const mfeDisp = mfeR != null ? `<span class="pos">+${mfeR.toFixed(2)}R</span>` : '—';
             const maeDisp = maeR != null ? `<span class="neg">-${Math.abs(maeR).toFixed(2)}R</span>` : '—';
+            // Return % = raw entry->exit price move, not pnl_pct (which is P&L / full
+            // notional value and rounds to ~0.00% for any leveraged instrument --
+            // pnl_pct is left untouched since other consumers rely on that definition).
+            let priceMovePct = null;
+            if (t.entry_price) {
+                priceMovePct = t.side === 'long'
+                    ? (t.exit_price - t.entry_price) / t.entry_price * 100
+                    : (t.entry_price - t.exit_price) / t.entry_price * 100;
+            }
+            const retPc = priceMovePct != null && priceMovePct < 0 ? 'neg' : 'pos';
             h += `<tr>
                 <td><strong>${t.asset}</strong></td>
                 <td><span class="badge badge-${t.side}">${t.side.toUpperCase()}</span></td>
                 <td>$${fmt(t.entry_price, 2)}</td>
                 <td>$${fmt(t.exit_price,  2)}</td>
                 <td class="${pc}">${t.pnl >= 0?'+':'-'}$${fmt(Math.abs(t.pnl),2)}</td>
-                <td class="${pc}">${t.pnl_pct >= 0?'+':''}${(t.pnl_pct||0).toFixed(2)}%</td>
+                <td class="${retPc}">${priceMovePct != null ? `${priceMovePct >= 0?'+':''}${priceMovePct.toFixed(2)}%` : '—'}</td>
                 <td style="font-size:11px;">${mfeDisp}</td>
                 <td style="font-size:11px;">${maeDisp}</td>
                 <td style="font-size:11px;color:var(--muted2);">${tradeType}</td>
