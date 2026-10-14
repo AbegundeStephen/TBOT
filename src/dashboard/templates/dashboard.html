@@ -2499,9 +2499,30 @@ function renderSignalsTable(signals, container) {
         const livermoreCell = (lsm1h || lsm4h)
             ? `<div style="font-size:11px;">${esc(lsm1h||'—')}</div><div style="font-size:10px;color:var(--muted);">4H: ${esc(lsm4h||'—')}</div>`
             : '<span style="color:var(--muted);">—</span>';
-        const proofCell = meta?.ns_entry
-            ? `<div style="font-size:11px;">${esc(meta.ns_entry)}</div><div style="font-size:10px;color:var(--muted);">${esc(meta.ns_kind||'')}</div>`
-            : '<span style="color:var(--muted);">—</span>';
+        // Desire 14 Oct: staged break/retest/close-through prices, not just the
+        // raw entry-style code. A "B" (break-style) proof only ever confirms
+        // the break -- retest/close-through are the setup's known levels but
+        // haven't happened yet, so they're labelled "awaiting"; any other style
+        // ("E"/"PKG") has already passed all three by the time it fires.
+        const proofCell = (() => {
+            if (!meta?.ns_entry) return '<span style="color:var(--muted);">—</span>';
+            const breakOnly = meta.ns_entry === 'B';
+            const stages = [
+                ['Break', meta.ns_r2, true],
+                ['Retest', meta.ns_edge, !breakOnly],
+                ['Close through', meta.ns_h2, !breakOnly],
+            ];
+            let html = '<div style="font-size:10px;line-height:1.6;">';
+            for (const [label, price, done] of stages) {
+                if (price == null) continue;
+                const val = Number(price).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:5});
+                html += done
+                    ? `<div><span style="color:var(--green);">✓</span> ${label}: <span style="font-family:var(--font-mono);">${val}</span></div>`
+                    : `<div style="color:var(--muted);">⏳ awaiting ${label.toLowerCase()} <span style="font-family:var(--font-mono);">(${val})</span></div>`;
+            }
+            html += `<div style="color:var(--muted2);">${esc(meta.ns_kind||'')}</div></div>`;
+            return html;
+        })();
         const councilCell = (meta?.total_score!=null && meta?.required_score!=null)
             ? `<span style="font-family:var(--font-mono);font-size:11px;">${Number(meta.total_score).toFixed(2)}/${Number(meta.required_score).toFixed(2)}</span>`
             : '<span style="color:var(--muted);">—</span>';
@@ -2547,7 +2568,8 @@ function goSignalPage(p) {
 // Signal export
 function signalsToCsv(sigs) {
     const h = ['Timestamp','Asset','Signal','Quality','Regime','RegimeConf','Livermore1H','Livermore4H',
-               'ProofEntry','ProofKind','CouncilScore','CouncilRequired','AggregatorMode','Price','Executed','Outcome'].join(',');
+               'ProofEntry','ProofKind','BreakPrice','RetestPrice','CloseThroughPrice',
+               'CouncilScore','CouncilRequired','AggregatorMode','Price','Executed','Outcome'].join(',');
     const rows = sigs.map(s => {
         const meta = parseSignalMeta(s) || {};
         return [
@@ -2556,6 +2578,7 @@ function signalsToCsv(sigs) {
             s.signal_quality,s.regime,s.regime_confidence,
             meta.livermore_state_1h,meta.livermore_state_4h,
             meta.ns_entry,meta.ns_kind,
+            meta.ns_r2,meta.ns_edge,meta.ns_h2,
             meta.total_score,meta.required_score,meta.aggregator_mode,
             s.price,s.executed,
             getSignalOutcome(s).text.replace(/[^\w\s%:.+\-]/g,'').trim()

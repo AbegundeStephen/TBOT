@@ -3144,6 +3144,17 @@ class TradingBot:
             "council_vote": details.get("council_vote"),
             "ns_entry": self._cs_field(details, "ns_entry"),
             "ns_kind": self._cs_field(details, "ns_kind_raw"),
+            # Desire 14 Oct: the three staged proof prices (break/retest/close-
+            # through) for the dashboard Signals page's Proof column. All three
+            # are the setup's own pre-defined levels, so they're always present
+            # regardless of style -- but a "B" (break-style) entry only ever
+            # CONFIRMS the break; retest/close-through haven't happened yet at
+            # entry, so the dashboard labels those two "awaiting" rather than
+            # treating their presence as proof they occurred. An "E" (trigger-
+            # style, incl. "PKG") entry has already passed all three.
+            "ns_r2": self._cs_field(details, "ns_r2"),
+            "ns_edge": self._cs_field(details, "ns_edge"),
+            "ns_h2": self._cs_field(details, "ns_h2"),
             "livermore_state_1h": self._cs_field(details, "livermore_state_1h"),
             "livermore_state_4h": self._cs_field(details, "livermore_state_4h"),
         }
