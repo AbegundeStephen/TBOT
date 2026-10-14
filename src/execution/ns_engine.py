@@ -1050,6 +1050,10 @@ class NSEngine:
             "brc_proof_dist_atr": d * (e - (peak if style == "E" else r2)) / a4,
             "brc_retest_depth": depth, "brc_age": 0, "brc_first_confirmed_ts": str(t), "brc_gear": "4H/1H",
             "ns_entry": style, "ns_exit": cfg["exit"], "ns_target_atr": cfg["target_atr"],
+            # display only (Desire 14 Oct): the three staged prices -- break (r2),
+            # retest (edge), close-through (h2) -- for the dashboard Signals page's
+            # Proof column; never read by trading code (stop/target already are).
+            "ns_h2": float(s["h2"]),
             "ns_r2": float(r2), "ns_edge": float(s["edge"]), "ns_r1": float(s["r1"]), "ns_atr1": float(atr),
             "ns_stop": float(stop), "ns_target": (float(target) if target else None), "ns_close": float(e),
             "ns_kind_raw": s["kind"], "ns_strength": float(strength), "ns_setup_id": int(s["id"]),
@@ -1520,6 +1524,8 @@ class NSEngine:
             "brc_proof_dist_atr": d * (q - peak) / a4 if a4 else None,
             "brc_retest_depth": depth, "brc_age": 0, "brc_first_confirmed_ts": str(t), "brc_gear": "4H/4H",
             "ns_entry": "PKG", "ns_exit": cfg["exit"], "ns_target_atr": cfg["target_atr"],
+            # display only (Desire 14 Oct): see _candidate's matching comment.
+            "ns_h2": float(s["h2"]),
             "ns_r2": float(r2), "ns_edge": float(s["edge"]), "ns_r1": float(s["r1"]), "ns_atr1": float(atr),
             "ns_stop": float(stop), "ns_target": (float(tgt) if tgt is not None else None), "ns_close": float(q),
             "ns_kind_raw": s["kind"], "ns_strength": float(strength), "ns_setup_id": int(s["id"]),
