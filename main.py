@@ -3175,6 +3175,16 @@ class TradingBot:
                 gate_id = "ny_open"
             elif "stale price" in (block_source or "").lower():
                 gate_id = "stale_price"
+            elif "paper-only market" in _rr:
+                # B12 decision 7 (ns_paper_markets, e.g. AUDJPY): blocked on
+                # every cycle forever by design -- gates.json already carries
+                # a dedicated "explore_paper" entry for exactly this, but
+                # nothing routed to it, so every one of these fell into the
+                # generic bucket below and gate.log_vs_ledger alarmed on a
+                # permanent, by-design block that was never going to produce
+                # a ledger row (same class of gap B14 already fixed for
+                # ny_open -- see heartbeat.json's skip_gates).
+                gate_id = "explore_paper"
             else:
                 gate_id = "aggregator_other"
         gate_stage = _GATES_REGISTRY.get(gate_id, {}).get("stage", "unknown")
