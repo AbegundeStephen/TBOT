@@ -2287,8 +2287,18 @@ class VeteranTradeManager:
                 self.high, self.low, self.close = self.high[-500:], self.low[-500:], self.close[-500:]
 
             self.bars_in_trade += 1
-            if self.side == "long": self.highest_price_reached = max(self.highest_price_reached, new_high)
-            else: self.lowest_price_reached = min(self.lowest_price_reached, new_low)
+            # Track BOTH extremes every bar, regardless of side. Only the
+            # side-favorable one was tracked here before -- the trailing-stop
+            # logic below only ever needed that one, but Gate Tier 3.2
+            # (_check_retracement_holding) and the MFE/MAE close-time report
+            # both read whichever extreme matches the market's Livermore
+            # state, independent of this trade's own side, and silently got
+            # a value frozen at entry_price for the mismatched combinations.
+            # Purely additive: the trailing-stop decisions below are
+            # unchanged, since they still only ever read their own side's
+            # extreme.
+            self.highest_price_reached = max(self.highest_price_reached, new_high)
+            self.lowest_price_reached = min(self.lowest_price_reached, new_low)
 
             atr = self._calculate_atr() # Calculate ATR here
             return self.check_exit(new_close, atr) # Pass ATR to check_exit
@@ -2643,6 +2653,14 @@ class VeteranTradeManager:
                     self.highest_price_reached = current_price
                 old_high = self.highest_price_reached
                 self.highest_price_reached = max(self.highest_price_reached, current_price)
+                # Also track the opposite extreme -- purely additive, read only
+                # by Gate Tier 3.2 and the MFE/MAE close-time report, never by
+                # the trailing-stop decision just below (unchanged, still
+                # keyed on old_high/highest_price_reached only).
+                if self.lowest_price_reached is None:
+                    self.lowest_price_reached = current_price
+                else:
+                    self.lowest_price_reached = min(self.lowest_price_reached, current_price)
                 if self.runner_activated and self.highest_price_reached > old_high and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.highest_price_reached - (self.runner_trail_atr_multiplier * atr)
                     if new_trail > self.current_stop_loss:
@@ -2683,6 +2701,14 @@ class VeteranTradeManager:
                     self.lowest_price_reached = current_price
                 old_low = self.lowest_price_reached
                 self.lowest_price_reached = min(self.lowest_price_reached, current_price)
+                # Also track the opposite extreme -- additive only, read by
+                # Gate Tier 3.2 / the MFE/MAE report, never by the
+                # trailing-stop decision just below (unchanged: still keyed
+                # on old_low/lowest_price_reached only).
+                if self.highest_price_reached is None:
+                    self.highest_price_reached = current_price
+                else:
+                    self.highest_price_reached = max(self.highest_price_reached, current_price)
                 if self.runner_activated and self.lowest_price_reached < old_low and self.trade_type == "TREND" and _trail_start_ok:
                     new_trail = self.lowest_price_reached + (self.runner_trail_atr_multiplier * atr)
                     if new_trail < self.current_stop_loss:
