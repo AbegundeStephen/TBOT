@@ -329,12 +329,61 @@ class HistoricalDataUpdater:
                 lookback_days_override=lookback_days_override,
             )
             results[timeframe] = success
-        
+
+        # B14 Part 2 (Desire 16 Oct): the bot's own missing-candle check, right after this market's files are updated.
+        # It only reads the 1H and 4H files and logs "[DATA-GAP] ..." (the watchdog alarms on it). It never raises.
+        try:
+            self._b14_gap_check(asset_name)
+        except Exception as _gap_err:
+            logger.warning(f"[DATA-GAP] check failed for {asset_name}: {_gap_err}")
+
         # Summary
         successful = sum(1 for s in results.values() if s)
         logger.info(f"\n[SUMMARY] {asset_name}: {successful}/3 timeframes updated")
-        
+
         return results
+
+    def _b14_gap_check(self, asset_name: str, now: Optional[datetime] = None) -> int:
+        """B14 Part 2 (Desire 16 Oct): the missing-candle check (the rules are in src/update/data_gaps.py). Reads this
+        market's 1H and 4H files -- the same paths update_asset_timeframe writes -- and logs one "[DATA-GAP] ..."
+        warning per problem it has not reported yet in this run of the bot. Returns how many it logged."""
+        from src.update import data_gaps as _dg
+        asset_cfg = self.config["assets"].get(asset_name) or {}
+        symbol = asset_cfg.get("symbol", asset_name)
+        if asset_cfg.get("exchange", "binance") == "mt5":
+            symbol = asset_cfg.get("mt5_symbol", symbol)
+        group = _dg.group_of(asset_name, asset_cfg)
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        seen = self.__dict__.setdefault("_b14_gap_seen", set())
+        if len(seen) > 2000:
+            seen.clear()
+        logged = 0
+        for tf, tf_h in (("1h", 1), ("4h", 4)):
+            path = self.historical_dir / f"{symbol}_{tf}.csv"
+            try:
+                if not path.exists():
+                    if (asset_name, tf, "nofile") not in seen:
+                        seen.add((asset_name, tf, "nofile"))
+                        logged += 1
+                        logger.warning(f"[DATA-GAP] {asset_name} {tf.upper()}: price file not found ({path})")
+                    continue
+                ts = pd.to_datetime(pd.read_csv(path, usecols=[0]).iloc[:, 0], utc=True, errors="coerce").dropna()
+                ts = ts.dt.tz_localize(None)
+                recent = ts[ts >= pd.Timestamp(now) - pd.Timedelta(days=_dg.WINDOW_DAYS + 2)]
+                times = [x.to_pydatetime() for x in (recent if len(recent) else ts.nlargest(1))]
+                for g in _dg.find_gaps(times, asset_name, group, tf_h, now):
+                    # a hole is known by its LAST missing candle: its first one moves while the 7-day window slides past
+                    # it (keyed on that, an old hole was logged again every hour). After a restart a hole still inside
+                    # the window is reported once more.
+                    key = (asset_name, tf, g["kind"], g["end"] if g["kind"] == "hole" else g["newest"])
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    logged += 1
+                    logger.warning(_dg.report_line(asset_name, tf.upper(), g))
+            except Exception as e:
+                logger.warning(f"[DATA-GAP] check failed for {asset_name} {tf.upper()}: {e}")
+        return logged
 
     def update_all_enabled_assets(
         self,

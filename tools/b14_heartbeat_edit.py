@@ -21,6 +21,10 @@ ADDS -- each one watches something that would otherwise fail without a word:
   b14.startup_checks_failed  "[CONFIG] start-up checks failed" must never appear (the start-up safety checks crashed)
   b14.nightly_summary   the nightly alarm summary writes logs/b13_alarm_summary_*.txt every night (2-day window)
   b14.weekly_forward    the Saturday job's weekly forward report writes logs/b14_forward_*.txt every week (8-day window)
+  b14.data_gap          (Part 2, Desire 16 Oct) "[DATA-GAP]" must never appear: a 1H or 4H price file is missing candles
+                        the market should have made, the newest candles are late, or the check itself failed
+                        (src/update/data_gaps.py). Part 1 adds the 11 checks above; running this again in Part 2 adds
+                        only this one.
 MOVES the nightly pauses to New York time (Desire 16 Oct): "daily_break_utc" (right only in US winter time; JP225's
   wrong in both seasons) is replaced by "daily_break_ny" -- the 5 CFDs, 16:50-18:15 New York (they stop 17:00-18:00)
 RETIRES (switched off with a note, not deleted):
@@ -60,6 +64,8 @@ NEW = [
      "note": "B14 (Desire 16 Oct): the nightly alarm summary (tools/b14_task.ps1, 00:10 box time) writes its file every night"},
     {"id": "b14.weekly_forward", "type": "file_fresh", "file": "logs/b14_forward_*.txt", "window_min": 11520,
      "note": "B14 (Desire 16 Oct): the Saturday job's weekly forward report writes its file every week (8-day window)"},
+    {"id": "b14.data_gap", "no_warmup": True, "type": "cadence", "tag": "[DATA-GAP]", "max": 0, "window_min": 1440,
+     "note": "B14 Part 2 (Desire 16 Oct): a 1H/4H price file is missing candles the market should have made, or is behind"},
 ]
 GONE = ("b14.walls_failed", "b14.stair_failed", "b14.stop_hold_walls", "replayer.runs", "rl1.proposals_file")
 RETIRE = {"clock.startup": "B14 (Desire 16 Oct): could never fire -- skipped for 30 days after every start, and any "
