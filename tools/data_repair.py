@@ -52,3 +52,11 @@ print("TOTAL stale candles fixed: %d   |   to undo: copy the files in %s back in
 OLDBK = sorted(d for d in os.listdir("data") if d.startswith("raw_backup_"))[:-4]
 [shutil.rmtree(os.path.join("data", d), ignore_errors=True) for d in OLDBK]
 print("old backups removed (the newest 4 are kept):", OLDBK or "none")
+# B14 Part 2 (Desire 16 Oct): MT5 not connected already ends with code 2 above (3 Oct's case: "MT5 connected: False").
+# This covers the other way to repair nothing: MT5 connected, but no candles back for a file. The Saturday job flags a
+# step only by its exit code, so the tool now ends with code 4 then (like data_check.py): the job reports it and sends
+# its Telegram.
+_nothing = [os.path.basename(x[4]) for x in FILES if x[4] not in MT]
+if _nothing:
+    print("FAILED: MT5 returned nothing for %d of %d file(s) -- they were NOT repaired: %s" % (len(_nothing), len(FILES), ", ".join(_nothing)))
+    _sys.exit(4)

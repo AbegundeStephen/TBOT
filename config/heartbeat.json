@@ -1042,6 +1042,16 @@
       "window_min": 11520,
       "note": "B14 (Desire 16 Oct): the Saturday job's weekly forward report writes its file every week (8-day window)",
       "enabled": true
+    },
+    {
+      "id": "b14.data_gap",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[DATA-GAP]",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 Part 2 (Desire 16 Oct): a 1H/4H price file is missing candles the market should have made, or is behind",
+      "enabled": true
     }
   ],
   "daily_break_ny": {
