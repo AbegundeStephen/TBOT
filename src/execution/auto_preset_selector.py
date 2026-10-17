@@ -491,6 +491,10 @@ class DynamicPresetSelector:
         
         return '\n'.join(lines)
     
+    PRESET_MSG_MAX = 4   # B14 (Desire 16 Oct): preset-change messages a market may send in one UTC day
+    SEND_PRESET = False  # B14 (Desire 16 Oct): the preset-change Telegram messages are switched off (9-11 a day on the
+                         # box on days without restarts, 31-94 with them); True sends them (HTML, max PRESET_MSG_MAX)
+
     def _send_preset_change_notification(
         self,
         asset: str,
@@ -501,6 +505,12 @@ class DynamicPresetSelector:
         score: int
     ):
         """Send Telegram notification with 4-preset support"""
+        if not self.SEND_PRESET:
+            # B14 (Desire 16 Oct): switched off -- said honestly (the old send looked for a Telegram part that does not
+            # exist, so it never sent anything and said nothing)
+            logger.info(f"[TELEGRAM] preset change for {asset} not sent: preset messages are switched off "
+                        f"({old_preset or 'None'} -> {new_preset})")
+            return
         if not self.telegram_bot:
             return
         
@@ -546,16 +556,28 @@ class DynamicPresetSelector:
             # Send via Telegram
             import asyncio
             
-            if hasattr(self.telegram_bot, 'telegram_loop') and self.telegram_bot.telegram_loop:
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self.telegram_bot.send_notification(msg, disable_preview=True),
-                        self.telegram_bot.telegram_loop
-                    )
-                    future.result(timeout=5)
-                    logger.info(f"[TELEGRAM] ✓ Preset change notification sent for {asset}")
-                except Exception as e:
-                    logger.debug(f"[TELEGRAM] Notification error: {e}")
+            # B14 (Desire 16 Oct): really sent now. It looked for self.telegram_bot.telegram_loop, which exists nowhere,
+            # so this message was never sent. HTML (escaped: a stray _ or * in the Markdown made Telegram refuse the
+            # whole message), through post() (Telegram not ready -> kept, sent once it is back), and at most
+            # PRESET_MSG_MAX a day per market (more are only logged) so it can never flood the chat.
+            import html as _h14, re as _re14
+            _day14 = datetime.utcnow().strftime("%Y-%m-%d")
+            _cnt14 = getattr(self, "_b14_preset_msgs", {})
+            self._b14_preset_msgs = _cnt14
+            _k14 = (asset, _day14)
+            _cnt14[_k14] = _cnt14.get(_k14, 0) + 1
+            if _cnt14[_k14] > self.PRESET_MSG_MAX:
+                logger.info(f"[TELEGRAM] preset change for {asset} not sent: already {self.PRESET_MSG_MAX} today "
+                            f"({old_preset} -> {new_preset})")
+                return
+            _m14 = _h14.escape(msg)
+            _m14 = _re14.sub(r"\*([^*\n]+)\*", r"<b>\1</b>", _m14)
+            _m14 = _re14.sub(r"`([^`\n]+)`", r"<code>\1</code>", _m14)
+            if _cnt14[_k14] == self.PRESET_MSG_MAX:
+                _m14 += "\n(the last preset message for %s today -- more changes are only logged)" % _h14.escape(asset)
+            self.telegram_bot.post(self.telegram_bot.send_notification(_m14, disable_preview=True, parse_mode="HTML"),
+                                   label="preset change %s" % asset)
+            logger.info(f"[TELEGRAM] preset change message handed to Telegram for {asset} ({old_preset} -> {new_preset})")
             
         except Exception as e:
             logger.error(f"[TELEGRAM] Failed to send preset notification: {e}")

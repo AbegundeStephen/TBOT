@@ -3745,11 +3745,9 @@ class PortfolioManager:
             },
         )
 
-        if self.telegram_bot and self.telegram_bot._current_loop:
+        if self.telegram_bot:                     # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
             try:
-                import asyncio
-
-                asyncio.run_coroutine_threadsafe(
+                self.telegram_bot.post(
                     self.telegram_bot.notify_trade_closed(
                         asset=asset,
                         side=position.side,
@@ -3759,10 +3757,10 @@ class PortfolioManager:
                         partial=True,
                         partial_pct=partial_fraction * 100,
                     ),
-                    self.telegram_bot._current_loop,
+                    label="partial close %s" % asset,
                 )
-            except Exception:
-                pass
+            except Exception as _e14t:
+                logger.warning(f"[TELEGRAM] partial-close alert not handed over: {_e14t}")
 
         return {
             "asset": asset,
@@ -3785,10 +3783,10 @@ class PortfolioManager:
         """B9: one place for the batch's Telegram alerts. Never raises."""
         try:
             _tg = getattr(self, "telegram_bot", None)
-            if _tg and getattr(_tg, "_is_ready", False):
+            if _tg:                               # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
                 _coro = _tg.send_message(text=text, parse_mode="HTML")
-                if _coro and getattr(_tg, "trading_bot", None):
-                    _tg.trading_bot._send_telegram_notification(_coro)
+                if _coro:
+                    _tg.post(_coro, label="alert")
         except Exception as _e:
             logger.debug(f"[B9-ALERT] failed: {_e}")
 
@@ -4377,6 +4375,8 @@ class PortfolioManager:
             "adopted": bool(getattr(position, "adopted", False)),       # B7-2
             "trial_only": bool(getattr(position, "trial_only", False)), # B7-14
             "ns_labels": getattr(position, "ns_labels", None),            # B12: tracking labels
+            "ns_b14n_step": (int(((getattr(_exit_vtm, "ns_b14n_st", None) or {}).get("step", 0)) or 0)
+                            if _exit_vtm is not None else None),                 # B14: ladder rungs taken
             "council_vote": getattr(position, "council_vote", None),      # B12: PASS / HOLD
             # B12 (Desire 28 Sep, decision 38): every proof detail, for RL-2 -- the diary stores it once in its
             # snapshot file and links it from this row (the same way practice rows already work)
@@ -4440,10 +4440,9 @@ class PortfolioManager:
         )
 
         # Send notification
-        if self.telegram_bot and self.telegram_bot._current_loop:
+        if self.telegram_bot:                     # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
             try:
-                # Use a thread-safe method to call the async notification
-                asyncio.run_coroutine_threadsafe(
+                self.telegram_bot.post(
                     self.telegram_bot.notify_trade_closed(
                         asset=trade_result["asset"],
                         side=trade_result["side"],
@@ -4452,7 +4451,7 @@ class PortfolioManager:
                         * 100,  # Convert to percentage points
                         reason=trade_result["reason"],
                     ),
-                    self.telegram_bot._current_loop,
+                    label="trade closed %s" % trade_result["asset"],
                 )
             except Exception as e:
                 logger.error(
@@ -4472,15 +4471,15 @@ class PortfolioManager:
                 logger.debug(f"[RLHF] outcome_pipeline.record failed: {e}")
 
             _rlhf_trade_id = getattr(position, "db_trade_id", None)
-            if _rlhf_trade_id and self.telegram_bot and self.telegram_bot._current_loop:
+            if _rlhf_trade_id and self.telegram_bot:   # B14 (16 Oct): not ready -> kept, sent once it is back
                 try:
-                    asyncio.run_coroutine_threadsafe(
+                    self.telegram_bot.post(
                         self.telegram_bot.send_rlhf_label_prompt(
                             asset=trade_result["asset"],
                             pnl_pct=trade_result["pnl_pct"] * 100,
                             trade_id=_rlhf_trade_id,
                         ),
-                        self.telegram_bot._current_loop,
+                        label="label prompt %s" % trade_result["asset"],
                     )
                 except Exception as e:
                     logger.debug(f"[RLHF] label prompt send failed: {e}")

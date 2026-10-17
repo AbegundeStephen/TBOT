@@ -37,7 +37,6 @@
     "size_reduced":       {"stage": "post_approval"},
     "geometry_refused":   {"stage": "post_approval", "note": "B4 P0c: the shared stop/target gauntlet's floor/clamp/R:R refusal, discovered AFTER the fill (this codebase commits to a fill before VTM ever runs) -- results in an immediate close, not a blocked signal."},
     "not_worthwhile":     {"stage": "post_approval", "note": "B4 P0g-3: worthwhileness check specifically (no level pays min_reward_ccy, or risk exceeds the per-trade budget) -- a narrower case of geometry_refused, kept distinct per the doc's own instruction."},
-    "lane_b":             {"stage": "control"},
     "lane_c":             {"stage": "control"},
     "proof_outscored":    {"stage": "post_council", "note": "B6-2: passed the council but lost the one position to a larger margin on the same candle. Recorded, never traded, NOT burned -- it can come back."},
     "opposite_side_active": {"stage": "post_approval", "note": "B6-2: a passing proof blocked because the asset already holds the opposite side (one position per asset). Was silent; now recorded."}

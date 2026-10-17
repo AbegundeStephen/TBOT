@@ -1890,10 +1890,10 @@ def main():
     try:
         if weekly:
             # B15 decision D3 (Desire 12 Oct): TEST 2 (the B11 rules frozen on 24 Sep) is dropped from the Saturday run;
-            # its 30-trade rule now applies to B15's live trades (tools/b15_weekly.py). The forward frame is still
-            # built here, silently, because the paper ideas below measure on it.
-            print("\n   TEST 2 (the B11 rules frozen on 24 Sep) is no longer run on Saturdays -- B15 decision D3: its "
-                  "30-trade rule now applies to the B15 live trades, in the B15 weekly replay (logs\\b15_weekly_<date>.txt)")
+            # its 30-trade rule now applies to the new B14 rules' live trades (tools/b14_forward.py, Desire 16 Oct). The
+            # forward frame is still built here, silently, because the paper ideas below measure on it.
+            print("\n   TEST 2 (the B11 rules frozen on 24 Sep) is no longer run on Saturdays -- decision D3: its 30-trade "
+                  "rule now applies to the new B14 rules' live trades, in the weekly forward report (logs\\b14_forward_<stamp>.txt)")
             fdf = run_window(ns, FREEZE + pd.Timedelta(minutes=1), pd.Timestamp("2100-01-01"))
         else:
             fdf = test2(ns, bt)

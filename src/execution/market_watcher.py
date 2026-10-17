@@ -721,8 +721,7 @@ class MarketWatcher:
         if not self.telegram_bot or not self._send_telegram:
             return
         try:
-            if hasattr(self.telegram_bot, "_is_ready") and not self.telegram_bot._is_ready:
-                return
+            # B14 (Desire 16 Oct): Telegram not ready -> the alert is kept and sent once it is back (was: skipped)
             coro = self.telegram_bot.send_message(text=message, parse_mode="HTML")
             if coro:
                 self._send_telegram(coro)

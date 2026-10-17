@@ -910,22 +910,6 @@ class MeanReversionStrategy(BaseStrategy):
                         self.asset, _intended_dir, _brc_ok2, _brc_kind2,
                         _brc_dir2, _brc_age2,
                     )
-                    # LANES L3: mirror of L2 -- record the reversal lane's
-                    # suppressed intent for Lane B capture.
-                    self._lane_b_intent = {
-                        "signal": _intended_dir,
-                        "confidence": 0.0,
-                        "brc_kind": _brc_kind2,
-                        "brc_direction": _brc_dir2,
-                        "brc_age": _brc_age2,
-                        "brc_confirmed": _brc_ok2,
-                        "same_direction": (_brc_dir2 == _intended_dir),
-                        "reason": "mr_no_reversal_proof",
-                    }
-                    logger.debug(
-                        "[LANE-B-DIAG] %s MR: intent SET on id=%s",
-                        getattr(self, "asset", "?"), id(self),
-                    )
                     return 0, 0.0
 
         # ── TRENDING veto: counter-trend in a strong trend is fatal ──────────
@@ -1248,10 +1232,6 @@ class MeanReversionStrategy(BaseStrategy):
 
         Signature is backward-compatible: composite_state is optional.
         """
-        # LANES L3: clear last cycle's intent so a stale one is never reused
-        # (mirrors L2 -- generate_signal is the dispatcher that runs every
-        # cycle regardless of which mode routing selects below).
-        self._lane_b_intent = None
         self._cross_lane_proof = None   # LANE-1 SEG C: per-cycle
         if len(df) < self.get_warmup_period():
             return 0, 0.0

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "note": "The levers the B14 learner (tools/b14_rl.py) may try -- Desire 16 Oct 2026. Each lever is one setting of the new B14 rules (b14_rules.TUNABLE, or one number of the ladder). 'exit' levers re-run only the exits of the same trades (fast, every week); 'entry' levers re-run the whole replay (slow, a few per week, picked by the learner). 'step' is how far one try moves the value; 'min'/'max' bound every try. To let the learner try a new lever, add it here -- the learner itself never changes the bot.",
+  "levers": [
+    {"name": "LADDER.t1", "kind": "exit",  "step": 0.2,  "min": 0.4, "max": 3.0, "text": "ladder rung 1: price this far ahead (R)"},
+    {"name": "LADDER.l1", "kind": "exit",  "step": 0.1,  "min": 0.0, "max": 2.0, "text": "ladder rung 1: the stop moves to (R)"},
+    {"name": "LADDER.t2", "kind": "exit",  "step": 0.2,  "min": 0.6, "max": 4.0, "text": "ladder rung 2: price this far ahead (R)"},
+    {"name": "LADDER.l2", "kind": "exit",  "step": 0.1,  "min": 0.0, "max": 3.0, "text": "ladder rung 2: the stop moves to (R)"},
+    {"name": "LADDER.t3", "kind": "exit",  "step": 0.2,  "min": 0.8, "max": 5.0, "text": "ladder rung 3: price this far ahead (R)"},
+    {"name": "LADDER.l3", "kind": "exit",  "step": 0.1,  "min": 0.0, "max": 4.0, "text": "ladder rung 3: the stop moves to (R)"},
+    {"name": "CLEAR_ATR1", "kind": "entry", "step": 0.05, "min": 0.0, "max": 0.5, "text": "the clearance: the entry close beats the peak by (1H moves)"},
+    {"name": "TARGET_FROM", "kind": "entry", "step": 0.25, "min": 1.0, "max": 4.0, "text": "the target window starts at (R)"},
+    {"name": "TARGET_TO", "kind": "entry", "step": 0.25, "min": 1.5, "max": 5.0, "text": "the target window ends at (R)"},
+    {"name": "TARGET_EXT", "kind": "entry", "step": 0.25, "min": 2.0, "max": 6.0, "text": "the target may stretch out to (R)"},
+    {"name": "REARM_MAX", "kind": "entry", "step": 1, "min": 0, "max": 8, "int": true, "text": "re-arms per setup"},
+    {"name": "BTC_FALLBACK_ATR1", "kind": "entry", "step": 0.5, "min": 2.0, "max": 8.0, "markets": ["BTC"], "text": "BTC's fallback target (1H moves)"}
+  ]
+}

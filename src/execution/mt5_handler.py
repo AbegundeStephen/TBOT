@@ -1155,7 +1155,7 @@ class MT5ExecutionHandler:
                                 _bot_ref = getattr(self, 'trading_bot', None)
                                 _tg = getattr(_bot_ref, 'telegram_bot', None)
                                 _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
-                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                if _tg and _sfn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                                     _sfn(_tg.send_message(
                                         text=(
                                             f"⚠️ <b>FAST EXIT</b> — {asset} #{mt5_ticket}\n"
@@ -1180,7 +1180,7 @@ class MT5ExecutionHandler:
                                 _bot_ref = getattr(self, 'trading_bot', None)
                                 _tg = getattr(_bot_ref, 'telegram_bot', None)
                                 _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
-                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                if _tg and _sfn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                                     try:
                                         _sfn(_tg.send_message(
                                             text=(
@@ -1236,7 +1236,7 @@ class MT5ExecutionHandler:
                                 _bot_ref = getattr(self, 'trading_bot', None)
                                 _tg = getattr(_bot_ref, 'telegram_bot', None)
                                 _sfn = getattr(_bot_ref, '_send_telegram_notification', None)
-                                if _tg and _sfn and getattr(_tg, '_is_ready', False):
+                                if _tg and _sfn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                                     _sfn(_tg.send_message(
                                         text=(
                                             f"🚨 <b>EMERGENCY CLOSE</b> — {asset} #{mt5_ticket}\n"
@@ -2751,7 +2751,7 @@ class MT5ExecutionHandler:
                                         _bot = getattr(self, 'trading_bot', None)
                                         _telegram = getattr(_bot, 'telegram_bot', None)
                                         _send_fn = getattr(_bot, '_send_telegram_notification', None)
-                                        if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                                        if _telegram and _send_fn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                                             _coro = _telegram.send_message(
                                                 text=(f"⚠️ <b>HAND TRADE WITH NO STOP</b>\n"
                                                       f"{asset} {pos_type.upper()} #{pos.ticket} @ {pos.price_open}\n"
@@ -2837,7 +2837,7 @@ class MT5ExecutionHandler:
                             _bot      = getattr(self, 'trading_bot', None)
                             _telegram = getattr(_bot, 'telegram_bot', None)
                             _send_fn  = getattr(_bot, '_send_telegram_notification', None)
-                            if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                            if _telegram and _send_fn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                                 _pnl_str = (
                                     f"{'🟢 +' if (_raw_profit or 0) >= 0 else '🔴 '}"
                                     f"${abs(_raw_profit or 0):.2f}"
@@ -2944,7 +2944,7 @@ class MT5ExecutionHandler:
                 _bot = getattr(self, 'trading_bot', None)
                 _telegram = getattr(_bot, 'telegram_bot', None)
                 _send_fn = getattr(_bot, '_send_telegram_notification', None)
-                if _telegram and _send_fn and getattr(_telegram, '_is_ready', False):
+                if _telegram and _send_fn:   # B14 (16 Oct): not ready -> kept, sent once Telegram is back
                     _pnl_str = (
                         f"{'🟢 +' if (_raw_profit or 0) >= 0 else '🔴 '}"
                         f"${abs(_raw_profit or 0):.2f}"

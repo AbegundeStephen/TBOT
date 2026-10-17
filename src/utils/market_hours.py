@@ -40,12 +40,51 @@ class MarketHours:
     US_PRE_MARKET_START = time(4, 0)
     US_AFTER_HOURS_END = time(20, 0)
 
-    # Forex/Gold Market hours (Sunday 22:00 GMT to Friday 22:00 GMT)
-    # Most brokers including Exness follow this schedule
+    # Forex/Gold Market hours. B14 (Desire 16 Oct): in NEW YORK time -- the week opens Sunday 17:00 and closes
+    # Friday 17:00 New York, so 21:00 UTC in US summer time and 22:00 UTC in US winter time. The old fixed 22:00 UTC
+    # was right only in winter. The 5 CFDs (GOLD, SILVER, USTEC, USOIL, JP225) also pause every weeknight 17:00-18:00
+    # New York (285 nights of the box's 30-minute candles, both seasons -- 16 Oct).
     FOREX_WEEK_OPEN_DAY = 6  # Sunday
-    FOREX_WEEK_OPEN_HOUR = 22  # 22:00 GMT (Sunday evening)
     FOREX_WEEK_CLOSE_DAY = 4  # Friday
-    FOREX_WEEK_CLOSE_HOUR = 22  # 22:00 GMT (Friday evening)
+    FOREX_OPEN_CLOSE_NY_MIN = 17 * 60          # 17:00 New York
+    ROLLOVER_NY = (16 * 60 + 30, 18 * 60 + 30)  # the rollover dead zone, 16:30-18:30 New York, Monday to Friday
+
+    @staticmethod
+    def us_dst(utc_naive) -> bool:
+        """US daylight-saving time, computed in code (no time-zone database needed): from the second Sunday of March
+        02:00 local (07:00 UTC) to the first Sunday of November 02:00 local (06:00 UTC). utc_naive = a UTC datetime."""
+        y = utc_naive.year
+        m8 = datetime(y, 3, 8)
+        start = m8 + timedelta(days=(6 - m8.weekday()) % 7, hours=7)
+        n1 = datetime(y, 11, 1)
+        end = n1 + timedelta(days=(6 - n1.weekday()) % 7, hours=6)
+        return start <= utc_naive < end
+
+    @staticmethod
+    def ny_offset_hours(utc_naive) -> int:
+        """New York's offset from UTC at that moment: -4 in US summer time, -5 in winter."""
+        return -4 if MarketHours.us_dst(utc_naive) else -5
+
+    @staticmethod
+    def utc_naive() -> datetime:
+        return MarketHours.get_gmt_time().replace(tzinfo=None)
+
+    @staticmethod
+    def ny_now() -> datetime:
+        """The time in New York now (naive). Built on get_gmt_time, so every clock rule follows one source."""
+        u = MarketHours.utc_naive()
+        return u + timedelta(hours=MarketHours.ny_offset_hours(u))
+
+    @staticmethod
+    def next_forex_open_utc() -> datetime:
+        """The next Sunday 17:00 New York, as naive UTC."""
+        ny = MarketHours.ny_now()
+        days = (6 - ny.weekday()) % 7
+        if days == 0 and ny.hour * 60 + ny.minute >= MarketHours.FOREX_OPEN_CLOSE_NY_MIN:
+            days = 7
+        t_ny = (ny + timedelta(days=days)).replace(hour=17, minute=0, second=0, microsecond=0)
+        u = t_ny + timedelta(hours=5)                                   # a first guess: winter
+        return t_ny - timedelta(hours=MarketHours.ny_offset_hours(u))
 
     @staticmethod
     def get_eastern_time() -> datetime:
@@ -88,29 +127,18 @@ class MarketHours:
     def is_forex_market_open() -> bool:
         """
         Check if Forex/Gold market is open (Exness schedule)
-        Market is open from Sunday 22:00 GMT to Friday 22:00 GMT
+        B14 (Desire 16 Oct): open from Sunday 17:00 to Friday 17:00 NEW YORK time (21:00 UTC in US summer time,
+        22:00 UTC in winter; it was a fixed 22:00 UTC, an hour late all summer)
         """
-        now = MarketHours.get_gmt_time()
-        current_day = now.weekday()  # 0=Monday, 6=Sunday
-        current_hour = now.hour
-
-        # Saturday is always closed
-        if current_day == 5:  # Saturday
+        ny = MarketHours.ny_now()
+        day, mins = ny.weekday(), ny.hour * 60 + ny.minute      # 0=Monday, 6=Sunday, New York
+        if day == 5:  # Saturday
             return False
-
-        # Sunday: open from 22:00 onwards
-        if current_day == 6:  # Sunday
-            return current_hour >= MarketHours.FOREX_WEEK_OPEN_HOUR
-
-        # Monday to Thursday: always open
-        if current_day < 4:  # Monday to Thursday
-            return True
-
-        # Friday: open until 22:00
-        if current_day == 4:  # Friday
-            return current_hour < MarketHours.FOREX_WEEK_CLOSE_HOUR
-
-        return False
+        if day == 6:  # Sunday: open from 17:00 New York
+            return mins >= MarketHours.FOREX_OPEN_CLOSE_NY_MIN
+        if day == 4:  # Friday: open until 17:00 New York
+            return mins < MarketHours.FOREX_OPEN_CLOSE_NY_MIN
+        return True
 
     @staticmethod
     def is_crypto_market_open() -> bool:
@@ -140,13 +168,11 @@ class MarketHours:
                 now = MarketHours.get_gmt_time()
                 day_name = now.strftime("%A")
                 
-                if now.weekday() == 5:  # Saturday
-                    return "CLOSED", f"Market closed - Weekend ({day_name})"
-                elif now.weekday() == 6 and now.hour < 22:  # Sunday before 22:00
-                    hours_until = 22 - now.hour
-                    return "CLOSED", f"Market opens Sunday at 22:00 GMT (in ~{hours_until}h)"
-                elif now.weekday() == 4 and now.hour >= 22:  # Friday after 22:00
-                    return "CLOSED", f"Market closed - Weekend ({day_name})"
+                _open = MarketHours.next_forex_open_utc()     # B14: Sunday 17:00 New York
+                _h = max(0, int(round((_open - now.replace(tzinfo=None)).total_seconds() / 3600.0)))
+                if now.weekday() in (4, 5) or (now.weekday() == 6 and _h <= 24):
+                    return "CLOSED", (f"Market closed - Weekend ({day_name}); opens Sunday at {_open:%H:%M} UTC "
+                                      f"(17:00 New York, in ~{_h}h)")
                 else:
                     return "CLOSED", f"Market closed - Outside trading hours"
 
@@ -194,22 +220,8 @@ class MarketHours:
             if MarketHours.is_forex_market_open():
                 return 0
 
-            now = MarketHours.get_gmt_time()
-            
-            # If it's Sunday before 22:00, calculate time until 22:00 today
-            if now.weekday() == 6 and now.hour < 22:
-                next_open = now.replace(hour=22, minute=0, second=0, microsecond=0)
-                return int((next_open - now).total_seconds())
-            
-            # Otherwise, find next Sunday 22:00
-            days_until_sunday = (6 - now.weekday()) % 7
-            if days_until_sunday == 0:  # Today is Sunday but after 22:00
-                days_until_sunday = 7
-            
-            next_open = now + timedelta(days=days_until_sunday)
-            next_open = next_open.replace(hour=22, minute=0, second=0, microsecond=0)
-            
-            return int((next_open - now).total_seconds())
+            # B14 (Desire 16 Oct): the next Sunday 17:00 New York (it was a fixed 22:00 UTC)
+            return max(0, int((MarketHours.next_forex_open_utc() - MarketHours.utc_naive()).total_seconds()))
 
         elif asset_type == "stocks":
             if MarketHours.is_us_stock_market_open():
@@ -246,8 +258,8 @@ class MarketHours:
         hour = now.hour
         day = now.weekday()
 
-        # Weekend Gate (already implemented in should_trade, but here for safety)
-        if day == 5 or (day == 4 and hour >= 22) or (day == 6 and hour < 22):
+        # Weekend Gate (already implemented in should_trade, but here for safety) -- B14: the forex week, New York time
+        if not MarketHours.is_forex_market_open():
             return "LOW"
 
         # Asian Session (00:00 - 07:00 UTC) is generally lower liquidity for BTC institutional moves
@@ -259,36 +271,20 @@ class MarketHours:
     @staticmethod
     def is_rollover_dead_zone() -> bool:
         """
-        Detects the high-risk 'Rollover' period (21:30 - 23:30 UTC) on weekdays.
-        This is when liquidity is lowest, spreads are highest, and price
-        action is often directionless or prone to gaps.
+        Detects the high-risk 'Rollover' period on weekdays: 16:30 - 18:30 NEW YORK time (B14, Desire 16 Oct) --
+        20:30-22:30 UTC in US summer time, 21:30-23:30 UTC in winter (it was a fixed 21:30-23:30 UTC, an hour late
+        all summer). This is when liquidity is lowest, spreads are highest, and price action is often directionless
+        or prone to gaps; the 5 CFDs (JP225 included) pause 17:00-18:00 New York inside it.
 
-        NOTE: Sunday is explicitly excluded — 22:00 UTC on Sunday is the Forex/Gold
+        NOTE: Sunday is explicitly excluded — Sunday 17:00 New York is the Forex/Gold
         market OPEN on Exness (and most MT5 brokers), not a rollover period.
-        Blocking Sunday 22:00–23:30 would eat the first 90 minutes of the week.
         """
-        now = MarketHours.get_gmt_time()
-        day = now.weekday()   # 0=Monday … 5=Saturday, 6=Sunday
-        hour = now.hour
-        minute = now.minute
-
-        # Sunday: market is opening, not rolling over — never block
-        if day == 6:
+        ny = MarketHours.ny_now()
+        day = ny.weekday()   # 0=Monday … 5=Saturday, 6=Sunday (New York)
+        if day in (5, 6):    # Saturday closed; Sunday is the week's open, not a rollover -- never block
             return False
-
-        # Saturday: market is closed anyway, no need to flag rollover
-        if day == 5:
-            return False
-
-        # Mon–Fri: block the 21:30–23:30 UTC window
-        if hour == 21 and minute >= 30:
-            return True
-        if hour == 22:
-            return True
-        if hour == 23 and minute < 30:
-            return True
-
-        return False
+        mins = ny.hour * 60 + ny.minute
+        return MarketHours.ROLLOVER_NY[0] <= mins < MarketHours.ROLLOVER_NY[1]
 
     @staticmethod
     def should_trade(asset_type: str = "forex") -> bool:
