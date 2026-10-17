@@ -1,93 +1,98 @@
-"""B14 (Desire 8-9 Oct) -- the B14 settings in config\\config.json. Run with the bot STOPPED (the bot reads
+"""B14 (Desire 15-16 Oct 2026) -- the new B14 settings in config\\config.json. Run with the bot STOPPED (the bot reads
 config.json only at start-up). A backup is made first; only the named keys change; running it twice changes nothing
-more; it prints every change.
+more; every change is printed.
 
-  python tools\\b14_config.py phase1 [files...]  -- at the B14 install (live at once):
-        risk_management.daily_loss_brakes_enabled = false   (2.1/2.2: the 4% and the hidden 10% day brakes off)
-        portfolio.profit_lock_enabled             = false   (2.3: the profit lock off; the 15% top brake and the
-                                                              5-loss brake stay)
-        phase_config.b14_rules_enabled            = false   (the new entry/exit rules: present but OFF)
-        phase_config.ns_engine_days               = 75      (1.2: the engine's own history, in days)
-        trading.look_on_candle_close              = true    (3.1: one look at every 30-minute close)
-        trading.look_delay_seconds                = 30
-        trading.practice_tick_seconds             = 5       (3.3: practice exits in the trade loop)
-  python tools\\b14_config.py phase2 [files...]  -- ONLY after Desire has reviewed the box test:
-        phase_config.b14_rules_enabled            = true    (sections 5 and 6 switch on)
-        phase_config.ns_markets.BTC.target_atr    = 4.0     (6.1: BTC aims for 4 hourly moves ...)
-        phase_config.ns_markets.BTC.exit          = "FIXED" (... with a fixed exit; its runner goes)
-        The engine rebuilds every market's memory by itself on the next start (the rules changed).
-  python tools\\b14_config.py undo2 [files...]   -- back to phase 1: the B14 rules off, BTC back on its runner
-        (target_atr null, exit "RUNNER" -- the B13 values). The memory rebuilds by itself again.
-  python tools\\b14_config.py set KEY=VALUE [files...]  -- one quick switch, only these keys:
-        trading.look_on_candle_close=false     (the old 5-minute timer, no code change)
-        risk_management.daily_loss_brakes_enabled=true   portfolio.profit_lock_enabled=true   (brakes back on)
-        ...or any other key listed under phase1 / phase2 above. VALUE is JSON: true, false, 75, 4.0, "FIXED", null
-  python tools\\b14_config.py show [files...]    -- print the current values, change nothing
-Default file: config\\config.json. Give the repo copies too (config\\config.prod.json config\\config.template.json)
-so all three stay the same."""
+  python tools\\b14_config.py install [files...]  -- at the install, before the bot is started:
+        phase_config.b14_new_rules_enabled         = false   (the new B14 rules: present but OFF -- the B13 rules trade)
+        the old switches removed (their code is gone): b14_rules_enabled, b14_knobs, b15_small_4h_only, lane_b_enabled,
+                                                        b18_rules_enabled
+        AUDJPY live (Desire 15 Oct): off phase_config.ns_paper_markets; ns_markets.AUDJPY.min_reward_ccy = 0.0 (no $5
+        minimum, like EURUSD / GBPAUD / EURJPY); ns_markets.AUDJPY.cont_only = false (both ways, like the others)
+  python tools\\b14_config.py on [files...]       -- ONLY when Desire says so: phase_config.b14_new_rules_enabled = true.
+        Refused until 'install' has run (an old switch still in the file). The engine rebuilds every market's memory
+        by itself on the next start (the rules changed).
+  python tools\\b14_config.py off [files...]      -- phase_config.b14_new_rules_enabled = false (the B13 rules trade
+        again; AUDJPY stays live -- 'audjpy_paper' puts it back on the paper list)
+  python tools\\b14_config.py audjpy_paper [files...] -- AUDJPY back to the 15 Oct values: paper list ["AUDJPY"],
+        min_reward_ccy removed (the $5 default), cont_only true
+  python tools\\b14_config.py show [files...]     -- print the current values, change nothing
+The learner's settings (phase_config.b14_tuning) are written only by tools\\b14_rl_apply.py.
+Default file: config\\config.json. Give the repo copies too (config\\config.prod.json config\\config.template.json) so
+all three stay the same."""
 import json
 import os
 import shutil
 import sys
 import time
 
-PHASE1 = [("risk_management", "daily_loss_brakes_enabled", False), ("portfolio", "profit_lock_enabled", False),
-          ("phase_config", "b14_rules_enabled", False), ("phase_config", "ns_engine_days", 75),
-          ("trading", "look_on_candle_close", True), ("trading", "look_delay_seconds", 30),
-          ("trading", "practice_tick_seconds", 5)]
-PHASE2 = [("phase_config", "b14_rules_enabled", True)]
-PHASE2_BTC = [("target_atr", 4.0), ("exit", "FIXED")]
-UNDO2 = [("phase_config", "b14_rules_enabled", False)]
-UNDO2_BTC = [("target_atr", None), ("exit", "RUNNER")]
-SET_OK = {"%s.%s" % (s, k) for s, k, _v in PHASE1 + PHASE2}
-SET_OK_BTC = {"phase_config.ns_markets.BTC.target_atr": "target_atr", "phase_config.ns_markets.BTC.exit": "exit"}
+MODES = ("install", "on", "off", "audjpy_paper", "show")
+OLD_KEYS = ("b14_rules_enabled", "b14_knobs", "b15_small_4h_only", "lane_b_enabled", "b18_rules_enabled")
 
 
 def show(d):
-    for sec, key, _v in PHASE1:
-        print("   %s.%s = %s" % (sec, key, json.dumps((d.get(sec) or {}).get(key, "(not set)"))))
-    btc = ((d.get("phase_config") or {}).get("ns_markets") or {}).get("BTC")
-    print("   phase_config.ns_markets.BTC: %s" % (json.dumps({k: btc.get(k) for k in ("entry", "target_atr", "exit")})
-                                                if btc else "(NO BTC BLOCK -- BTC would run on the built-in settings)"))
+    pc = d.get("phase_config") or {}
+    print("   phase_config.b14_new_rules_enabled = %s" % json.dumps(pc.get("b14_new_rules_enabled", "(not set)")))
+    print("   phase_config.b14_tuning            = %s" % json.dumps(pc.get("b14_tuning", "(not set: the rules file's own)")))
+    print("   phase_config.ns_paper_markets      = %s" % json.dumps(pc.get("ns_paper_markets", "(not set)")))
+    old = [k for k in OLD_KEYS if k in pc]
+    print("   old switches still in the file      = %s" % (", ".join(old) if old else "none"))
+    aj = (pc.get("ns_markets") or {}).get("AUDJPY")
+    print("   phase_config.ns_markets.AUDJPY: %s" % (json.dumps({k: aj.get(k, "(not set)") for k in
+                                                                 ("min_reward_ccy", "cont_only", "target_atr", "exit")})
+                                                    if aj else "(NO AUDJPY BLOCK -- tell Claude)"))
 
 
-def parse_set(arg):
-    """'section.key=value' -> (top-level changes, BTC changes); refuses any key B14 does not own."""
-    if "=" not in arg:
-        sys.exit("set needs KEY=VALUE, e.g. trading.look_on_candle_close=false")
-    key, raw = arg.split("=", 1)
-    key = key.strip()
-    try:
-        val = json.loads(raw.strip())
-    except ValueError:
-        sys.exit("the value must be JSON (true, false, a number, \"text\" or null): %s" % raw)
-    if key in SET_OK:
-        sec, k = key.split(".", 1)
-        return [(sec, k, val)], []
-    if key in SET_OK_BTC:
-        return [], [(SET_OK_BTC[key], val)]
-    sys.exit("not a B14 key: %s (allowed: %s)" % (key, ", ".join(sorted(SET_OK | set(SET_OK_BTC)))))
+def apply(d, mode):
+    """-> (list of change texts, error text or None). Changes d in place."""
+    pc = d.setdefault("phase_config", {})
+    changed = []
+
+    def setk(blk, key, val, name):
+        if blk.get(key, "(not set)") != val:
+            changed.append("%s: %s -> %s" % (name, json.dumps(blk.get(key, "(not set)")), json.dumps(val)))
+            blk[key] = val
+
+    if mode == "on":
+        old = [k for k in OLD_KEYS if k in pc]
+        if old:
+            return changed, "the old switches are still in this file (%s) -- run 'install' first" % ", ".join(old)
+        setk(pc, "b14_new_rules_enabled", True, "phase_config.b14_new_rules_enabled")
+        return changed, None
+    if mode == "off":
+        setk(pc, "b14_new_rules_enabled", False, "phase_config.b14_new_rules_enabled")
+        return changed, None
+    aj = (pc.get("ns_markets") or {}).get("AUDJPY")
+    if aj is None:
+        return changed, "no phase_config.ns_markets.AUDJPY block -- nothing changed; tell Claude"
+    if mode == "install":
+        setk(pc, "b14_new_rules_enabled", False, "phase_config.b14_new_rules_enabled")
+        for k in OLD_KEYS:
+            if k in pc:
+                changed.append("phase_config.%s: %s -> (removed: its code is gone)" % (k, json.dumps(pc[k])))
+                del pc[k]
+        paper = [m for m in (pc.get("ns_paper_markets") or []) if str(m).upper() != "AUDJPY"]
+        setk(pc, "ns_paper_markets", paper, "phase_config.ns_paper_markets")
+        setk(aj, "min_reward_ccy", 0.0, "ns_markets.AUDJPY.min_reward_ccy")
+        setk(aj, "cont_only", False, "ns_markets.AUDJPY.cont_only")
+        return changed, None
+    if mode == "audjpy_paper":
+        paper = [m for m in (pc.get("ns_paper_markets") or []) if str(m).upper() != "AUDJPY"] + ["AUDJPY"]
+        setk(pc, "ns_paper_markets", paper, "phase_config.ns_paper_markets")
+        if "min_reward_ccy" in aj:
+            changed.append("ns_markets.AUDJPY.min_reward_ccy: %s -> (removed: the $%s default)" % (
+                json.dumps(aj["min_reward_ccy"]), json.dumps(pc.get("min_reward_ccy", 5.0))))
+            del aj["min_reward_ccy"]
+        setk(aj, "cont_only", True, "ns_markets.AUDJPY.cont_only")
+        return changed, None
+    return changed, "unknown mode"
 
 
 def main():
-    if len(sys.argv) < 2 or sys.argv[1] not in ("phase1", "phase2", "undo2", "set", "show"):
+    if len(sys.argv) < 2 or sys.argv[1] not in MODES:
         print(__doc__)
         sys.exit(1)
     mode = sys.argv[1]
-    rest = sys.argv[2:]
-    top, btc_changes = [], []
-    if mode == "phase1":
-        top = PHASE1
-    elif mode == "phase2":
-        top, btc_changes = PHASE2, PHASE2_BTC
-    elif mode == "undo2":
-        top, btc_changes = UNDO2, UNDO2_BTC
-    elif mode == "set":
-        if not rest:
-            sys.exit("set needs KEY=VALUE")
-        top, btc_changes = parse_set(rest[0])
-        rest = rest[1:]
-    files = rest or [os.path.join("config", "config.json")]
+    files = sys.argv[2:] or [os.path.join("config", "config.json")]
     bad = 0
     for path in files:
         print("=== %s ===" % path)
@@ -100,23 +105,12 @@ def main():
         if mode == "show":
             show(d)
             continue
-        changed = []
-        for sec, key, val in top:
-            blk = d.setdefault(sec, {})
-            if blk.get(key, "(not set)") != val:
-                changed.append("%s.%s: %s -> %s" % (sec, key, json.dumps(blk.get(key, "(not set)")), json.dumps(val)))
-                blk[key] = val
-        if btc_changes:
-            btc = ((d.get("phase_config") or {}).get("ns_markets") or {}).get("BTC")
-            if btc is None:
-                print("   NO phase_config.ns_markets.BTC BLOCK -- BTC left alone; tell Claude")
-                bad += 1
-            else:
-                for key, val in btc_changes:
-                    if btc.get(key, "(not set)") != val:
-                        changed.append("ns_markets.BTC.%s: %s -> %s" % (key, json.dumps(btc.get(key, "(not set)")),
-                                                                        json.dumps(val)))
-                        btc[key] = val
+        changed, err = apply(d, mode)
+        if err:
+            print("   REFUSED: %s" % err)
+            bad += 1
+            show(json.loads(raw))
+            continue
         if not changed:
             print("   nothing to change (already applied)")
             show(d)
@@ -134,7 +128,7 @@ def main():
             f.write("\n")
         json.load(open(tmp, encoding="utf-8"))                     # reads back cleanly before it replaces the file
         os.replace(tmp, path)
-        print("   backup: %s" % bk)
+        print("   backup: %s  (a full copy of the config -- never commit it, never send it)" % bk)
         for c in changed:
             print("   changed: " + c)
         show(d)

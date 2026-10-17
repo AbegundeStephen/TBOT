@@ -361,8 +361,7 @@ def _draw_panel(ax, tf, d1, w1, ctx, asset):
             ax.plot([-0.5, xr], [r1, r1], color=COL["r1"], lw=1.2, ls="--", zorder=6)
         if ctx["proofs"]:
             f = ctx["proofs"][-1].get("fields", {})
-            half = pd.Timedelta(minutes=120 if f.get("ns_clock") == "4H" else      # B15: a 4H close
-                                15 if f.get("ns_entry") == "PKG" else 30)
+            half = pd.Timedelta(minutes=15 if f.get("ns_entry") == "PKG" else 30)
             for tk, pk, lab, col in (("ns_b_t", "ns_b_px", "B", COL["r2"]), ("ns_touch_t", "ns_touch_px", "R", "#6a1b9a"),
                                      ("ns_candle", "ns_close", "E", "black")):
                 try:
@@ -373,10 +372,15 @@ def _draw_panel(ax, tf, d1, w1, ctx, asset):
                         ax.text(xm, px, lab, color=col, fontsize=8, fontweight="bold", ha="center", va="center", zorder=9)
                 except Exception:
                     pass
-            for _lv, _lab in ((f.get("ns_lock_at"), " lock"),):          # B14 6.4: where the lock fires
-                if _lv not in (None, "None"):
-                    ax.plot([P.n - 0.5, xr], [float(_lv), float(_lv)], color="#00838f", lw=1.2, ls=(0, (2, 2)), zorder=7)
-                    ax.text(xr, float(_lv), _lab, color="#00838f", fontsize=8, va="center", clip_on=True)
+            if f.get("ns_b14n") and f.get("ns_close") not in (None, "None") and f.get("ns_stop") not in (None, "None"):
+                # the new B14's R-ladder: the three prices where the stop steps up (Desire 15 Oct)
+                from src.execution.b14_rules import LADDER as _LAD
+                _e, _s = float(f["ns_close"]), float(f["ns_stop"])
+                _d = 1 if int(f.get("setup_dir", 1)) == 1 else -1
+                for _a, _b in _LAD:
+                    _lv = _e + _d * _a * abs(_e - _s)
+                    ax.plot([P.n - 0.5, xr], [_lv, _lv], color="#00838f", lw=1.0, ls=(0, (2, 2)), zorder=7)
+                    ax.text(xr, _lv, " +%gR" % _a, color="#00838f", fontsize=8, va="center", clip_on=True)
     pad = (hi_ - lo_) * 0.08
     ax.set_ylim(lo_ - pad, hi_ + pad)
     ax.axhline(ctx["last"], color="#999999", lw=0.8, ls=":")
@@ -395,25 +399,23 @@ def _panel_lines(asset, ctx):
     lines = ["%s -- %s UTC" % (asset, str(now)[:16]), ""]
     if proofs:
         f = proofs[-1].get("fields", {})
-        lines += ["LATEST PROOF: %s %s%s" % ("BUY" if int(f.get("setup_dir", 1)) == 1 else "SELL", f.get("ns_entry", ""),
-                                            (" " + f["ns_label"]) if f.get("ns_label") else ""),
+        lines += ["LATEST PROOF: %s %s" % ("BUY" if int(f.get("setup_dir", 1)) == 1 else "SELL", f.get("ns_entry", "")),
                   "  line %s  entry %s" % (g6(f.get("ns_r2")), g6(f.get("ns_close"))),
                   "  stop %s  target %s" % (g6(f.get("ns_stop")), g6(f.get("ns_target"))),
                   "  %s, candle %s" % (f.get("ns_kind_raw", ""), str(f.get("ns_candle"))[:16])]
-        if f.get("ns_b14"):
-            # B14 8.3 (Desire 9 Oct): the route, the witness, the lock and the staircase
+        lines.append("  diagonal: %s" % ("agrees" if f.get("ns_diag_agrees") else "none in the 24 h before"))
+        if f.get("ns_b14n"):
+            # the new B14 (Desire 15-16 Oct): the witness (recorded only), the target's line, the ladder
             import textwrap as _tw
-            walls = f.get("ns_walls") or []
-            lines += _tw.wrap("route: %s" % (f.get("ns_route") or "-"), 40, initial_indent="  ", subsequent_indent="    ")
-            lines += _tw.wrap("witness: %s" % (f.get("ns_witness") or "none in the 12 h before"), 40,
+            from src.execution.b14_rules import LADDER as _LAD
+            lines += _tw.wrap("witness: %s" % (("%s broke %s" % (f.get("ns_b14n_witness_name"),
+                                                                 str(f.get("ns_b14n_witness_t"))[:16]))
+                                               if f.get("ns_b14n_witness") else "none in the 24 h before"), 40,
                               initial_indent="  ", subsequent_indent="    ")
-            lines += [
-                      "  target: %s" % (f.get("ns_target_kind") or "normal"),
-                      "  lock: stop to entry at %s" % g6(f.get("ns_lock_at")) if walls else "  lock: no big wall before the target"]
-            for W in walls[:3]:
-                lines.append("  stair: close past %s -> stop %s" % (g6(W.get("s_far")), g6(W.get("s_near"))))
-        else:
-            lines.append("  diagonal: %s" % ("agrees" if f.get("ns_diag_agrees") else "none in the 24 h before"))
+            lines += _tw.wrap("target: %s" % (f.get("ns_b14n_target_text") or f.get("ns_b14n_target_kind") or "-"), 40,
+                              initial_indent="  ", subsequent_indent="    ")
+            lines += _tw.wrap("ladder: " + ", ".join("+%gR->stop +%gR" % (_a, _b) for _a, _b in _LAD), 40,
+                              initial_indent="  ", subsequent_indent="    ")
     elif setups:
         s = sorted(setups, key=lambda x: -int(x.get("stage", 0)))[0]
         lines += ["WATCHING SETUP #%s: %s" % (s.get("id"), "BUY" if int(s.get("d", 1)) == 1 else "SELL"),

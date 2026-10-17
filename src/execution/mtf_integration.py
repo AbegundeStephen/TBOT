@@ -25,7 +25,7 @@ class MTFRegimeIntegration:
     """
 
     def __init__(
-        self, data_manager, db_manager=None, ai_validator=None, telegram_bot=None
+        self, data_manager, db_manager=None, ai_validator=None, telegram_bot=None, notify=None
     ):
         """
         Initialize integration
@@ -35,8 +35,10 @@ class MTFRegimeIntegration:
             db_manager: TradingDatabaseManager instance (optional)
             ai_validator: HybridSignalValidator instance (optional)
             telegram_bot: TelegramBot instance (optional)
+            notify: the bot's sender (main.py TradingBot._send_telegram_notification) -- B14 (Desire 16 Oct)
         """
         self.data_manager = data_manager
+        self._notify = notify                 # B14 (Desire 16 Oct): mood messages are really sent through it
         self.db_manager = db_manager
         self.ai_validator = ai_validator
         self.telegram_bot = telegram_bot
@@ -238,11 +240,20 @@ class MTFRegimeIntegration:
 
         # Regime changed: update tracker and notify
         self._last_notified_regime[asset] = new_regime
+        if previous is None:
+            # B14 (Desire 16 Oct): the first reading after a start is not a change -- noted, never sent (otherwise
+            # every restart would send one message per market)
+            logger.info(f"[MTF TG] first reading for {asset}: {new_regime} (not a change -- no message)")
+            return False
+        self._changed_from = getattr(self, "_changed_from", {})
+        self._changed_from[asset] = previous
         logger.info(
             f"[MTF TG] Regime change detected for {asset}: "
-            f"{previous or 'NONE'} → {new_regime}"
+            f"{previous} → {new_regime}"
         )
         return True
+
+    SEND_MOOD = False   # B14 (Desire 16 Oct): the 'market changed mood' Telegram messages are switched off
 
     def _send_telegram_notification(self, regime_status: RegimeStatus): # Updated parameter type
         """
@@ -252,13 +263,20 @@ class MTFRegimeIntegration:
             regime_status: RegimeStatus object
         """
         try:
-            # Format message
+            # B14 (Desire 16 Oct): the mood messages are OFF (up to ~19 a day on the box's last week). The log says so
+            # -- it used to say "✓ Sent" while the send was commented out. SEND_MOOD = True sends them (through the
+            # bot's sender: Telegram not ready -> kept, sent once it is back).
+            if not self.SEND_MOOD:
+                logger.info(f"[MTF TG] mood change for {regime_status.asset} not sent: mood messages are switched off")
+                return
             message = self._format_regime_message(regime_status)
-
-            # Send via Telegram bot
-            # self.telegram_bot.send_message(message)
-
-            logger.info(f"[MTF TG] ✓ Sent notification for {regime_status.asset}")
+            _tg = self.telegram_bot
+            if self._notify is None or _tg is None:
+                logger.warning(f"[MTF TG] not sent for {regime_status.asset}: no Telegram sender was given")
+                return
+            self._notify(_tg.send_message(text=message, parse_mode="HTML"))     # not ready -> kept, sent once it is back
+            logger.info(f"[MTF TG] mood message handed to Telegram for {regime_status.asset} (sent now, or kept "
+                        f"until Telegram is back)")
 
         except Exception as e:
             logger.error(f"[MTF TG] Failed to send notification: {e}")
@@ -273,17 +291,19 @@ class MTFRegimeIntegration:
         Returns:
             Formatted message string
         """
+        import html as _html
         emoji = "📈" if regime_status.is_bullish else ("📉" if regime_status.is_bearish else "➡️")
-
-        message = f"""
-{emoji} **MTF REGIME UPDATE - {regime_status.asset}**
-
-**Score:** {regime_status.score:.2f}
-**Bias:** {'BULLISH' if regime_status.is_bullish else 'BEARISH' if regime_status.is_bearish else 'NEUTRAL'}
-**Reasoning:** {regime_status.reasoning}
-"""
-
-        return message.strip()
+        # B14 (Desire 16 Oct): HTML (the old **bold** was never sent -- it would not have parsed); the change it reports
+        _was = (getattr(self, "_changed_from", {}) or {}).get(regime_status.asset)
+        _why = str(regime_status.reasoning or "")
+        if len(_why) > 600:
+            _why = _why[:600] + " ..."
+        bias = 'BULLISH' if regime_status.is_bullish else 'BEARISH' if regime_status.is_bearish else 'NEUTRAL'
+        return (f"{emoji} <b>MTF REGIME UPDATE - {_html.escape(str(regime_status.asset))}</b>\n\n"
+                f"<b>Mood:</b> {_html.escape(str(_was or '?'))} → {_html.escape(str(regime_status.consensus_regime))}\n"
+                f"<b>Score:</b> {regime_status.score:.2f}\n"
+                f"<b>Bias:</b> {bias}\n"
+                f"<b>Reasoning:</b> {_html.escape(_why)}")
 
     def get_regime_for_trading(
         self, asset_name: str, symbol: str, exchange: str

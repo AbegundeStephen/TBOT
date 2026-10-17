@@ -6,6 +6,8 @@ Veteran Trade Manager - Strategic/Tactical Risk Architecture
 
 import logging
 import threading
+
+from src.execution.b14_rules import STOP_REASONS as _B14N_STOP_REASONS    # B14 (Desire 15 Oct): the ladder's stop moves
 import numpy as np
 import talib
 import pandas as pd
@@ -577,23 +579,16 @@ class VeteranTradeManager:
         self.ns_armed      = False
         self.ns_peak       = None
         self._ns_last_bar  = 0
-        # B14 section 6 (Desire 8-9 Oct): the wall lock and the staircase, for trades taken under the B14 rules
-        self.ns_b14        = bool(_cs.get("ns_b14_exits"))
+        # B14 (Desire 15 Oct): the R-ladder rides on the proof (ns_b14n); its state is built on the first tick
+        self.ns_b14n        = bool(_cs.get("ns_b14n"))
+        self.ns_b14n_st     = None
+        self.ns_b14n_ladder_def = _cs.get("ns_b14n_ladder_def")   # the rungs this trade keeps (Desire 16 Oct)
         # B14 (found while building, knock-on of item 1.1): a package entry trades on the PACKAGE's own stop (behind
-        # the push, never closer than 1 move -- B13 item 29), and a line target (a channel's other side, 6.2-6.3) is
+        # the push, never closer than 1 move -- B13 item 29), and a line target (the new B14 line target) is
         # used as it is. Before, both were silently replaced by the engine's R2-based levels below.
         self.ns_pkg_stop   = _cs.get("ns_stop") if _cs.get("ns_entry") == "PKG" else None
         self.ns_line_target = _cs.get("ns_target") if _cs.get("ns_target_kind") not in (None, "", "normal") else None
         self.ns_target_kind = _cs.get("ns_target_kind")
-        self.ns_lock_done  = False
-        self.ns_stair_t    = None          # the 1H close the staircase last stepped on
-        # B15 (Desire 12 Oct): the lock and the staircase switch separately. B15 = no lock, the staircase from the entry.
-        # A trade made under B14 (no such fields) keeps B14's behaviour: the lock first, then the staircase.
-        self.ns_lock_on    = bool(_cs.get("ns_lock_on", True))
-        self.ns_stair_on   = bool(_cs.get("ns_stair_on", True))
-        self._ns_hour      = None          # (close time, close) of the newest 1H candle, fed by main.py's trade loop
-        self._ns_walls_key = None
-        self._ns_walls     = []
         # STOP-2 SEG F: the references the proof was built on. REF-1 froze
         # R2 (the level broken), R1 (the origin) and H (the trigger) on the
         # composite state, but nothing copied them here, so trade management
@@ -876,7 +871,9 @@ class VeteranTradeManager:
         self.telegram = None
         self.council_ref = None
         self.portfolio_manager = None   # B8-11: re-attached by load_portfolio_state
-        self._sl_lock = threading.Lock()
+        # B14: an RLock, as at construction (line ~776). _propose_stop re-enters the lock from inside the tick that
+        # already holds it; with a plain Lock a restored position's first stop move would deadlock the trade loop.
+        self._sl_lock = threading.RLock()
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
     def _lot_geom(self):
@@ -1294,8 +1291,8 @@ class VeteranTradeManager:
             logger.info("[NS-EXIT] %s: 7 days (%d candles) -- time exit at %.5g",
                         self.asset, self.bars_in_trade, current_price)
             return {"reason": ExitReason.TIME_STOP, "price": current_price, "size": self.remaining_position}
-        if getattr(self, "ns_b14", False):
-            self._b14_walls_step(current_price)
+        if getattr(self, "ns_b14n", False) and self.ns_exit == "FIXED":
+            self._b14n_ladder_step(current_price)                  # B14: the R-ladder, every tick
         if self.ns_exit == "RUNNER" and self.bars_in_trade > int(getattr(self, "_ns_last_bar", 0) or 0):
             self._ns_last_bar = self.bars_in_trade
             try:
@@ -1314,81 +1311,30 @@ class VeteranTradeManager:
                 logger.warning(f"[NS-RUNNER] {self.asset}: runner update skipped ({_re})")
         return None
 
-    def b14_hour_close(self, t_close, close):
-        """B14 item 6.5: main.py's trade loop hands over each new 1H close within seconds of it (the staircase steps
-        on it). Closes from before the entry are ignored."""
+    def _b14n_ladder_step(self, price: float):
+        """B14 (Desire 15 Oct): the R-ladder on every tick of the trade loop -- once price has been +1R ahead the stop
+        goes to +0.2R, at +1.6R to +0.8R, at +2R to +1.5R (b14_rules.LADDER). Never back. The same code the box test
+        and the practice trader run (b14_rules.ladder_stop); the stop moves through _propose_stop like every other."""
         try:
-            from datetime import timezone as _tz14
-            _t = pd.Timestamp(t_close)
-            _et = self.entry_time                         # datetime.now() at the entry: the box's local clock
-            _e = pd.Timestamp(_et.astimezone(_tz14.utc) if getattr(_et, "tzinfo", None) is None else _et)
-            _e = _e.tz_convert("UTC").tz_localize(None)
-            if _t.tzinfo is not None:
-                _t = _t.tz_convert("UTC").tz_localize(None)
-            if _t > _e:
-                self._ns_hour = (str(_t), float(close))
-        except Exception as _e14:
-            import time as _t14
-            if _t14.time() - getattr(self, "_ns_stair_warn_t", 0.0) >= 600:    # at most once per 10 minutes
-                self._ns_stair_warn_t = _t14.time()
-                logger.warning("[NS-STAIR-FAIL] %s: 1H close not taken (%s)", self.asset, _e14)
-
-    def _b14_walls_step(self, price: float):
-        """B14 section 6 (Desire 8-9 Oct), checked on every tick of the trade loop (every few seconds):
-          lock -- the stop goes to the entry the first time price touches the near edge of the first big wall's
-                  sphere between the entry and the target (if the entry is already inside that sphere: the wall line
-                  itself). One lock per trade.
-          staircase -- after the lock, each 1H close beyond a big wall's sphere moves the stop to that sphere's near
-                  edge (just behind the wall). The stop never moves back (_propose_stop is tighten-only).
-          B15 (Desire 12 Oct): each one has its own switch on the trade (ns_lock_on / ns_stair_on). With the lock off
-                  the staircase works from the entry.
-        The walls come from the market's newest line map (line_map.py), the same map the entry was judged on."""
-        try:
-            from src.execution import line_map as _LM
-            mp = _LM.latest(self.asset)
-            if mp is None or mp.n < 2:
-                if not getattr(self, "_ns_nomap_warned", False):
-                    self._ns_nomap_warned = True
-                    # (normal for a minute after a restart, before the first look builds the map; a map that is
-                    # never built is caught by the [MAP] alarms -- so this line is not an alarm itself)
-                    logger.info("[NS-WALLS-WAIT] %s: no line map yet -- the lock and the staircase wait for one",
-                                self.asset)
+            from src.execution import b14_rules as B14
+            if self.initial_stop_loss is None or self.current_stop_loss is None or self.entry_price is None:
                 return
-            self._ns_nomap_warned = False
-            d = 1 if self.side == "long" else -1
-            entry = float(self.entry_price)
-            tgt = float(self.take_profit_levels[0]) if self.take_profit_levels else None
-            b = mp.n - 1
-            key = (id(mp), b)
-            if self._ns_walls_key != key:
-                self._ns_walls_key = key
-                self._ns_walls = mp.walls_between(b, d, entry, tgt) if tgt is not None else \
-                    mp.walls_between(b, d, entry, None, reach=4.0)
-            walls = self._ns_walls
-            if self.ns_lock_on and not self.ns_lock_done:
-                lk = _LM.lock_level(walls, d, entry)
-                if lk is not None and d * (float(price) - lk) >= 0:
-                    self.ns_lock_done = True
-                    _ok = self._propose_stop(entry, "ns_wall_lock")
-                    logger.info("[NS-LOCK] %s %s: price %.5g reached %.5g, the near edge of the first big wall (%s at "
-                                "%.5g) -- stop %s", self.asset, self.side, float(price), lk, walls[0]["label"],
-                                walls[0]["near"], ("moved to the entry %.5g" % entry) if _ok else
-                                "already at or past the entry")
-            if self.ns_stair_on and (self.ns_lock_done or not self.ns_lock_on) and self._ns_hour is not None \
-                    and self._ns_hour[0] != self.ns_stair_t:
-                t_h, c_h = self._ns_hour
-                self.ns_stair_t = t_h
-                cur = float(self.current_stop_loss) if self.current_stop_loss is not None else entry
-                new = _LM.stair_step(walls, d, c_h, cur)
-                if new is not None:
-                    _ok = self._propose_stop(float(new), "ns_wall_stair")
-                    logger.info("[NS-STAIR] %s %s: the 1H close %.5g (%s) is beyond a big wall's sphere -- stop %s",
-                                self.asset, self.side, c_h, t_h, ("moved to %.5g" % new) if _ok else "not moved (not tighter)")
-        except Exception as _we:
-            import time as _t14
-            if _t14.time() - getattr(self, "_ns_walls_warn_t", 0.0) >= 600:    # at most once per 10 minutes
-                self._ns_walls_warn_t = _t14.time()
-                logger.warning("[NS-WALLS] %s: lock/staircase check failed (retried every tick): %s", self.asset, _we)
+            _d = 1 if self.side == "long" else -1
+            if self.ns_b14n_st is None:
+                _tp = float(self.take_profit_levels[0]) if self.take_profit_levels else None
+                self.ns_b14n_st = B14.exit_init(_d, float(self.entry_price), float(self.initial_stop_loss), _tp,
+                                               ladder=getattr(self, "ns_b14n_ladder_def", None))
+            _new, _why = B14.ladder_stop(self.ns_b14n_st, _d, float(self.entry_price), float(price), float(self.current_stop_loss))
+            if _new is not None:
+                logger.info("[NS-LADDER] %s: %s -> stop %.5g (price %.5g, best %.5g, %+.2fR reached)", self.asset, _why, _new,
+                            float(price), float(self.ns_b14n_st["best"]),
+                            _d * (float(self.ns_b14n_st["best"]) - float(self.entry_price)) / max(float(self.ns_b14n_st["risk0"]), 1e-12))
+                self._propose_stop(float(_new), _why)
+        except Exception as _le:
+            import time as _t14n
+            if _t14n.time() - getattr(self, "_ns_ladder_warn_t", 0.0) >= 600:    # at most once per 10 minutes
+                self._ns_ladder_warn_t = _t14n.time()
+                logger.warning("[NS-LADDER-FAIL] %s: ladder step skipped (%s)", self.asset, _le)
 
     def _finalise_stop_and_target(self, candidate_sl: float, candidate_tp: float, atr: float, source: str):
         """
@@ -4291,10 +4237,11 @@ class VeteranTradeManager:
             "ns_r2": getattr(self, "ns_r2", None), "ns_atr1": getattr(self, "ns_atr1", None),
             "ns_armed": getattr(self, "ns_armed", False), "ns_peak": getattr(self, "ns_peak", None),
             "_ns_last_bar": getattr(self, "_ns_last_bar", 0),
-            # B14 section 6: the lock and the staircase survive a restart
-            "ns_b14": getattr(self, "ns_b14", False), "ns_target_kind": getattr(self, "ns_target_kind", None),
-            "ns_lock_done": getattr(self, "ns_lock_done", False), "ns_stair_t": getattr(self, "ns_stair_t", None),
-            "ns_lock_on": getattr(self, "ns_lock_on", True), "ns_stair_on": getattr(self, "ns_stair_on", True),   # B15
+            # B14: the ladder's state survives a restart
+            "ns_b14n": getattr(self, "ns_b14n", False), "ns_b14n_st": getattr(self, "ns_b14n_st", None),
+            "ns_b14n_ladder_def": getattr(self, "ns_b14n_ladder_def", None),
+            # the line target's kind survives a restart (the target itself is the trade's own take-profit)
+            "ns_target_kind": getattr(self, "ns_target_kind", None),
         }
 
     @classmethod
@@ -4344,12 +4291,10 @@ class VeteranTradeManager:
         vtm.ns_armed = bool(state.get("ns_armed", False))
         vtm.ns_peak = state.get("ns_peak")
         vtm._ns_last_bar = int(state.get("_ns_last_bar", 0) or 0)
-        vtm.ns_b14 = bool(state.get("ns_b14", False))                 # B14 section 6
+        vtm.ns_b14n = bool(state.get("ns_b14n", False))                 # B14
+        vtm.ns_b14n_st = state.get("ns_b14n_st")
+        vtm.ns_b14n_ladder_def = state.get("ns_b14n_ladder_def")
         vtm.ns_target_kind = state.get("ns_target_kind")
-        vtm.ns_lock_done = bool(state.get("ns_lock_done", False))
-        vtm.ns_stair_t = state.get("ns_stair_t")
-        vtm.ns_lock_on = bool(state.get("ns_lock_on", True))           # B15: a B14 trade keeps the lock
-        vtm.ns_stair_on = bool(state.get("ns_stair_on", True))
         vtm._time_stop_extended = state.get("_time_stop_extended", False)
         vtm._counter_momentum_cut = state.get("_counter_momentum_cut", False)
         return vtm
@@ -4443,10 +4388,8 @@ class VeteranTradeManager:
             # about elsewhere.
             # B11-NS: in the new modes nothing moves the stop except the runner's own lock/trail.
             # Every other automated mover is held and logged; /set_sl does not come through here.
-            # B14 item 6.7 (Desire 9 Oct): the wall lock and the staircase are allowed too -- otherwise every one of
-            # their moves would be held here as [NS-STOP-HOLD] and never reach MT5.
-            if (not initial) and self._ns_active() and reason not in ("ns_runner_lock", "ns_runner_trail",
-                                                                       "ns_wall_lock", "ns_wall_stair"):
+            # B14: the ladder's own moves (b14_ladder1..3) are allowed too
+            if (not initial) and self._ns_active() and reason not in ("ns_runner_lock", "ns_runner_trail") + _B14N_STOP_REASONS:
                 logger.info("[NS-STOP-HOLD] %s: %s held -- would have moved SL to %s (current %s)",
                             self.asset, reason, candidate, self.current_stop_loss)
                 return False

@@ -54,12 +54,15 @@ try:
             env[k.strip()] = v.strip().strip('"').strip("'")
     tok, ids = env.get("TELEGRAM_BOT_TOKEN"), env.get("TELEGRAM_ADMIN_IDS", "")
     if tok and ids:
+        import ssl
+        import certifi
         import urllib.request
+        _ctx = ssl.create_default_context(cafile=certifi.where())
         for cid in [x.strip() for x in ids.split(",") if x.strip()]:
             req = urllib.request.Request("https://api.telegram.org/bot%s/sendMessage" % tok,
                                          data=json.dumps({"chat_id": cid, "text": text[:3900]}).encode(),
                                          headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=15).read()
+            urllib.request.urlopen(req, timeout=15, context=_ctx).read()
         print("sent to Telegram")
         _sent = True
     else:

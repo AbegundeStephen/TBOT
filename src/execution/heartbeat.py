@@ -574,19 +574,33 @@ class HeartbeatMonitor:
     # UTC). Times widened a little either side; the check's own window after
     # the pause is skipped too. Override with "daily_break_utc" in the registry.
     _DAILY_BREAK_UTC_B8 = {"GOLD": ("21:50", "23:15"), "USTEC": ("21:50", "23:15"), "USOIL": ("21:50", "23:15")}
+    # B14 (Desire 16 Oct): the pauses in NEW YORK time -- the 5 CFDs stop 17:00-18:00 New York every weeknight in both
+    # seasons (285 nights of the box's 30-minute candles); widened as B8-2 did. The old UTC table (and the registry's
+    # "daily_break_utc") was right only in US winter time -- an hour off all summer, and JP225's was wrong in both.
+    # Override with "daily_break_ny" in the registry.
+    _DAILY_BREAK_NY = {a: ("16:50", "18:15") for a in ("GOLD", "SILVER", "USTEC", "USOIL", "JP225")}
+
+    @staticmethod
+    def _ny_wd_min(epoch):
+        """(weekday, minutes) in New York at that moment (US daylight-saving rule computed in code)."""
+        from datetime import datetime as _dt14, timedelta as _td14
+        from src.utils.market_hours import MarketHours as _MH14
+        u = _dt14(*time.gmtime(epoch)[:6])
+        ny = u + _td14(hours=_MH14.ny_offset_hours(u))
+        return ny.weekday(), ny.hour * 60 + ny.minute
 
     def _b13_window_hits_weekend(self, asset, window_min):
-        """B13 item 6 (Desire 5 Oct): a check whose window reaches back into the weekend close (Friday 21:00 UTC ->
-        Sunday 22:00 UTC) can only read a false absence on Monday -- skip it until its window is clear of the weekend.
-        BTC trades all week, so its own per-market checks still run."""
+        """B13 item 6 (Desire 5 Oct): a check whose window reaches back into the weekend close can only read a false
+        absence on Monday -- skip it until its window is clear of the weekend. B14 (Desire 16 Oct): the weekend is
+        Friday 17:00 -> Sunday 17:00 NEW YORK time (it was Friday 21:00 -> Sunday 22:00 UTC: summer's close with
+        winter's open). BTC trades all week, so its own per-market checks still run."""
         if asset == "BTC":
             return False
         now = time.time()
         t = now - float(window_min or 0) * 60
         while t <= now:
-            g = time.gmtime(t)
-            wd, hm = g.tm_wday, g.tm_hour * 60 + g.tm_min           # Monday = 0 ... Sunday = 6
-            if (wd == 4 and hm >= 21 * 60) or wd == 5 or (wd == 6 and hm < 22 * 60):
+            wd, hm = self._ny_wd_min(t)                               # Monday = 0 ... Sunday = 6, New York
+            if (wd == 4 and hm >= 17 * 60) or wd == 5 or (wd == 6 and hm < 17 * 60):
                 return True
             t += 900
         return False
@@ -596,14 +610,17 @@ class HeartbeatMonitor:
             if not hasattr(self, "_b8_breaks"):
                 try:
                     with open(self.registry_path, encoding="utf-8") as _f:
-                        self._b8_breaks = json.load(_f).get("daily_break_utc") or self._DAILY_BREAK_UTC_B8
+                        _reg14 = json.load(_f)
+                    self._b8_breaks = _reg14.get("daily_break_ny") or self._DAILY_BREAK_NY
+                    if _reg14.get("daily_break_utc") and not _reg14.get("daily_break_ny"):
+                        logger.info("[HEARTBEAT] the registry's daily_break_utc is no longer used -- the nightly "
+                                    "pauses are in New York time (tools/b14_heartbeat_edit.py moves them)")
                 except Exception:
-                    self._b8_breaks = self._DAILY_BREAK_UTC_B8
+                    self._b8_breaks = self._DAILY_BREAK_NY
             span = self._b8_breaks.get(asset)
             if not span:
                 return False
-            _g = time.gmtime()
-            m = _g.tm_hour * 60 + _g.tm_min
+            _wd14, m = self._ny_wd_min(time.time())                   # B14: minutes in New York
             h1, m1 = (int(x) for x in span[0].split(":"))
             h2, m2 = (int(x) for x in span[1].split(":"))
             start, end = h1 * 60 + m1, h2 * 60 + m2 + int(window_min or 0)
@@ -680,17 +697,15 @@ class HeartbeatMonitor:
 
     def _notify(self, message):
         try:
-            if self.telegram_bot and getattr(self.telegram_bot, "_current_loop", None):
-                import asyncio
+            if self.telegram_bot:
                 # HF-2 H5: explicit plain text. send_notification's own
                 # parse_mode default is Markdown, and promise ids like
                 # "kill.once_per_bar" carry underscores -- an odd count
                 # left an unclosed italics span and Telegram silently
                 # rejected the whole message.
-                asyncio.run_coroutine_threadsafe(
-                    self.telegram_bot.send_notification(message, parse_mode=None),
-                    self.telegram_bot._current_loop,
-                )
+                # B14 (Desire 16 Oct): through post() -- Telegram not ready -> the alarm is kept, sent once it is back
+                self.telegram_bot.post(self.telegram_bot.send_notification(message, parse_mode=None),
+                                       label="watchdog alarm")
         except Exception as e:
             logger.debug("[HEARTBEAT] telegram notify failed: %s", e)
 

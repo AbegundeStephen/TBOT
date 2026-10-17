@@ -200,6 +200,8 @@ class ShadowPosition:
     ns_armed: bool = False              # B11-NS: runner lock taken
     ns_peak: float = 0.0                # B11-NS: runner's best price
     ns_setup_id: int = 0                # B11-NS: the proof this practice trade belongs to
+    ns_b14n: bool = False                # B14 (Desire 15 Oct): the proof was taken under the B14 rules (the ladder applies)
+    ns_b14n_st: Optional[dict] = None    # B14: the ladder's state (b14_rules.exit_init), saved with the position
     resume_count: int = 0               # MEASURE-2 S1: how many
     restart_gap_minutes: float = 0.0    # MEASURE-2 S1: blind window -- MFE/MAE unknown across it
     rolls_taken: int = 0            # TARGET-1 T9c: how many times the target rolled
@@ -242,6 +244,19 @@ class ShadowPosition:
                     (self.side == "long" and current_price >= self.take_profit) or
                     (self.side == "short" and current_price <= self.take_profit)):
                 return self._close(current_price, "take_profit")
+            if self.ns_exit == "FIXED" and getattr(self, "ns_b14n", False) and self.ns_b14n_st:
+                # B14: the R-ladder, the same code as the live trade manager (b14_rules.ladder_stop), on every price
+                try:
+                    from src.execution import b14_rules as _B14R
+                    _d14n = 1 if self.side == "long" else -1
+                    _new14n, _why14n = _B14R.ladder_stop(self.ns_b14n_st, _d14n, float(self.entry_price), float(current_price),
+                                                      float(self.stop_loss))
+                    if _new14n is not None:
+                        self.sl_path.append((datetime.utcnow().isoformat(), float(self.stop_loss), float(_new14n), _why14n))
+                        self.sl_path = self.sl_path[-200:]
+                        self.stop_loss = float(_new14n)
+                except Exception as _le14n:
+                    logger.debug(f"[NS-PRACTICE] {self.asset}: ladder step skipped ({_le14n})")
             return False
         if not self.tp1_reached and self.tp1_price > 0:
             if (self.side == "long" and current_price >= self.tp1_price) or \
@@ -460,9 +475,11 @@ class ShadowPosition:
             ),
             "episode_id": self.episode_id,   # DATA-1 ITEM 1
             "entry_atr":  self.entry_atr,    # FRAME-1 SEG 6: captured at open since 610 ITEM 4, never persisted
-            "lane":       self.lane,         # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
+            "lane":       self.lane,         # LANES L1: A | C-RANDOM | C-BIASED (lane B removed 16 Oct)
             "ns_exit": self.ns_exit, "ns_risk0": self.ns_risk0, "ns_armed": self.ns_armed,   # B11-NS
             "ns_peak": self.ns_peak, "ns_setup_id": self.ns_setup_id,
+            "ns_b14n": bool(getattr(self, "ns_b14n", False)),                                  # B14: the tag
+            "ns_b14n_step": int(((getattr(self, "ns_b14n_st", None) or {}).get("step", 0)) or 0),  # B14: ladder rungs taken
             "resumed":             self.resumed,               # MEASURE-2 S1
             "resume_count":        self.resume_count,          # MEASURE-2 S1
             "restart_gap_minutes": self.restart_gap_minutes,   # MEASURE-2 S1
@@ -605,7 +622,7 @@ class ShadowTradingEngine:
         trail_mult: float = 0.8,        # S7c: was hardcoded 1.5
         be_r: float = 0.75,             # S7c: was TP1-touch trigger
         episode_id: str = "",           # DATA-1 ITEM 1B
-        lane: str = "A",                # LANES L1: A | B-TF | B-MR | C-RANDOM | C-BIASED
+        lane: str = "A",                # LANES L1: A | C-RANDOM | C-BIASED (lane B removed 16 Oct)
         bypass_guards: bool = False,    # LANES L1: Lane C only -- see L1b
         pair_id: str = "",              # DIARY-1 D4: joins the paired-lane-C family
         variant: str = "",              # DIARY-1 D4: management-variant name within the pair
@@ -1021,6 +1038,11 @@ class ShadowTradingEngine:
                     pos.ns_risk0 = abs(pos.entry_price - float(_st_ns))
                     pos.ns_peak = pos.entry_price
                     pos.ns_setup_id = int(_cs_ns.get("ns_setup_id") or 0)
+                    pos.ns_b14n = bool(_cs_ns.get("ns_b14n"))             # B14: the ladder rides on the proof
+                    if pos.ns_b14n and pos.ns_exit == "FIXED":
+                        from src.execution import b14_rules as _B14o
+                        pos.ns_b14n_st = _B14o.exit_init(_d_ns, float(pos.entry_price), float(_st_ns), (_tp_ns or None),
+                                                        ladder=_cs_ns.get("ns_b14n_ladder_def"))
                     if pos.ns_setup_id:
                         self._ns_practiced = getattr(self, "_ns_practiced", set()) | {(asset_key, pos.ns_setup_id)}
                     logger.info(f"[NS-PRACTICE] {asset_key} {pos.side}: stop {_st_ns:.5g} target "

@@ -248,7 +248,17 @@ class TradingTelegramBot:
         # State tracking
         self._is_ready = False
         self._initialization_lock = threading.Lock()
-        self._message_queue = []
+        self._message_queue = []      # (old; unused since B14 16 Oct -- kept alerts live in self._waiting)
+        # B14 (Desire 16 Oct): alerts that could not be sent (Telegram not ready, no loop, or the network failed every
+        # retry) are KEPT here and sent, oldest first, once Telegram is back. They used to be dropped: the old queue
+        # was filled but nothing ever read it.
+        self._waiting = deque()
+        self._waiting_lock = threading.Lock()
+        self._waiting_dropped = 0
+        self._waiting_since = None
+        self._waiting_gen = 0
+        self._flushing = False
+        self._stop_asked = False
 
         # Error handling attributes
         self._network_error_count = 0
@@ -262,6 +272,94 @@ class TradingTelegramBot:
 
 
 
+
+    WAIT_MAX = 200   # B14 (Desire 16 Oct): at most this many kept alerts; past it the oldest is dropped and counted
+
+    def waiting_count(self):
+        return len(self._waiting)
+
+    def keep_for_later(self, item, label=""):
+        """B14 (Desire 16 Oct): keep an alert that cannot be sent now -- a send not started yet (a coroutine) or a
+        message (text, parse_mode, disable_preview) -- to be sent, oldest first, once Telegram is back. Thread-safe."""
+        with self._waiting_lock:
+            first = not self._waiting
+            if self._waiting_since is None:
+                self._waiting_since = time.time()
+            if len(self._waiting) >= self.WAIT_MAX:
+                _t, _old, _l = self._waiting.popleft()
+                self._waiting_dropped += 1
+                if asyncio.iscoroutine(_old):
+                    _old.close()
+            self._waiting.append((time.time(), item, label))
+            self._waiting_gen += 1
+            n = len(self._waiting)
+        (logger.warning if first else logger.info)(
+            "[TELEGRAM] not sent now -- kept, sent once Telegram is back (%d waiting)%s", n, (": " + label) if label else "")
+
+    def post(self, coro, wait=None, label=""):
+        """B14 (Desire 16 Oct): the one way to hand Telegram a send, from any thread. Telegram ready and its loop
+        running -> sent now (after any kept alerts, so the order stays); otherwise kept and sent once it is back.
+        wait = seconds to wait for the send; the send is never cancelled (it used to be cut at 15 s, which also cut
+        the B13 item 26 retries that ride out Telegram's 1-minute 'Bad Gateway' spells)."""
+        if coro is None:
+            return
+        label = label or getattr(coro, "__qualname__", "") or ""
+        loop = self._current_loop
+        if not self._is_ready or not self.application or loop is None or loop.is_closed():
+            self.keep_for_later(coro, label)
+            return
+        if self._waiting:
+            self.keep_for_later(coro, label)
+            asyncio.run_coroutine_threadsafe(self.send_waiting(), loop)
+            return
+        fut = asyncio.run_coroutine_threadsafe(coro, loop)
+        if wait:
+            try:
+                fut.result(timeout=wait)
+            except Exception as e:
+                logger.warning("[TELEGRAM] a send was still running after %ss -- it carries on (%s)", wait,
+                               str(e) or type(e).__name__)
+
+    async def send_waiting(self):
+        """B14 (Desire 16 Oct): send the kept alerts, oldest first, after one line saying they are late. Runs in the
+        bot's own loop, one at a time; stops (keeping the rest) as soon as a send has to be kept again."""
+        if self._flushing or not self._waiting:
+            return 0
+        self._flushing = True
+        n = 0
+        try:
+            with self._waiting_lock:
+                k, dropped, since = len(self._waiting), self._waiting_dropped, self._waiting_since
+            head = "\u23f3 %d delayed alert%s -- Telegram could not send %s since %s UTC%s; %s, oldest first" % (
+                k, "" if k == 1 else "s", "it" if k == 1 else "them",
+                time.strftime("%Y-%m-%d %H:%M", time.gmtime(since or time.time())),
+                (" (%d older one%s dropped: more than %d waited)" % (dropped, "" if dropped == 1 else "s", self.WAIT_MAX))
+                if dropped else "", "it follows" if k == 1 else "they follow")
+            if not await self.send_notification(head, parse_mode=None, _keep=False):
+                return 0                              # Telegram still failing: everything waits for the next try
+            while True:
+                with self._waiting_lock:
+                    if not self._waiting:
+                        self._waiting_dropped, self._waiting_since = 0, None
+                        break
+                    _t, item, label = self._waiting.popleft()
+                    g0 = self._waiting_gen
+                try:
+                    if asyncio.iscoroutine(item):
+                        await item
+                    else:
+                        _msg, _pm, _dp = item
+                        await self.send_notification(_msg, disable_preview=_dp, parse_mode=_pm)
+                    n += 1
+                except Exception as e:
+                    logger.error("[TELEGRAM] a delayed alert failed: %s", e)
+                if self._waiting_gen != g0:
+                    break                             # it had to be kept again: Telegram is failing -- stop here
+            if n:
+                logger.info("[TELEGRAM] %d delayed alert(s) sent (%d still waiting)", n, len(self._waiting))
+            return n
+        finally:
+            self._flushing = False
 
     def _run_in_loop(self, coro, timeout: float = 30.0):
         """
@@ -413,6 +511,7 @@ class TradingTelegramBot:
 
             logger.info("[TELEGRAM] Starting keepalive task...")
             asyncio.create_task(self._keepalive_task())
+            asyncio.create_task(self.send_waiting())      # B14 (Desire 16 Oct): alerts kept while Telegram was not up
 
             logger.info("[TELEGRAM] Starting polling...")
             await self.application.updater.start_polling(
@@ -458,6 +557,8 @@ class TradingTelegramBot:
                     try:
                         await self.application.bot.get_me()
                         logger.debug("[TELEGRAM] Keepalive ping successful")
+                        if self._waiting:
+                            await self.send_waiting()    # B14 (Desire 16 Oct): retry the kept alerts every 5 minutes
                     except Exception as e:
                         logger.warning(f"[TELEGRAM] Keepalive ping failed: {e}")
             except asyncio.CancelledError:
@@ -470,6 +571,9 @@ class TradingTelegramBot:
     async def shutdown(self):
         """Graceful shutdown"""
         logger.info("[TELEGRAM] Shutdown initiated...")
+        self._stop_asked = True                   # B14 (Desire 16 Oct): the thread does not restart a loop asked to stop
+        if self._waiting:
+            logger.warning("[TELEGRAM] shutting down with %d alert(s) never sent", len(self._waiting))
         self._shutdown_event.set()
 
     # ==================== COMMAND HANDLERS ====================
@@ -3506,7 +3610,18 @@ class TradingTelegramBot:
             except:
                 pass
 
-    async def send_notification(self, message: str, disable_preview: bool = True, parse_mode=_PARSE_MODE_UNSET):
+    async def send_message(self, text: str = "", parse_mode=_PARSE_MODE_UNSET, disable_web_page_preview: bool = True,
+                           **_ignored):
+        """B14 (Desire 16 Oct): twelve places in the bot call send_message(text=..., parse_mode=...) on this class,
+        which never had it, so every one of those alerts failed -- most of them silently: the package's decisions,
+        the daily alarm digest, 'proof held', the trial notices, the market watcher's alerts, MT5's fast exit,
+        protective stop failed, emergency close, hand trade with no stop, position closed by MT5 (twice) and the
+        portfolio's alerts. The same as send_notification, under the name they use; extra keywords are ignored."""
+        return await self.send_notification(message=str(text), disable_preview=disable_web_page_preview,
+                                            parse_mode=parse_mode)
+
+    async def send_notification(self, message: str, disable_preview: bool = True, parse_mode=_PARSE_MODE_UNSET,
+                                _keep: bool = True):
         """
         Send notification with proper error handling and retry logic.
         parse_mode: "HTML" | "Markdown" | None (None = no entity parsing,
@@ -3520,14 +3635,12 @@ class TradingTelegramBot:
         """
         if os.environ.get("TBOT_INSTANCE") and not message.startswith(f"[{os.environ['TBOT_INSTANCE']}] "):
             message = f"[{os.environ['TBOT_INSTANCE']}] {message}"
-        if not self._is_ready or not self.application:
-            logger.debug("[TELEGRAM] Not ready, queuing message")
-            self._message_queue.append(message)
-            return
-
-        if not self.is_running:
-            logger.warning("[TELEGRAM] Bot not running")
-            return
+        if not self._is_ready or not self.application or not self.is_running:
+            # B14 (Desire 16 Oct): kept and sent once Telegram is back (it used to go into a queue nothing read)
+            if _keep:
+                self.keep_for_later((message, parse_mode, disable_preview), message[:60])
+            return False
+        _net_fail = False   # B14: a timeout / network / closed-loop failure -> kept for later if no admin got it
 
         effective_parse_mode = ParseMode.MARKDOWN if parse_mode is _PARSE_MODE_UNSET else parse_mode
         success_count = 0
@@ -3553,6 +3666,7 @@ class TradingTelegramBot:
                     break  # Success
 
                 except asyncio.TimeoutError:
+                    _net_fail = True
                     logger.warning(
                         f"[TELEGRAM] Timeout sending to {admin_id} (attempt {attempt + 1}/{max_retries})"
                     )
@@ -3564,6 +3678,7 @@ class TradingTelegramBot:
                         )
 
                 except (NetworkError, TimedOut) as e:
+                    _net_fail = True
                     logger.warning(f"[TELEGRAM] Network error to {admin_id}: {e}")
                     if attempt < max_retries - 1:
                         # ✅ Try to reconnect by getting bot info
@@ -3576,6 +3691,7 @@ class TradingTelegramBot:
 
                 except RuntimeError as e:
                     if "Event loop is closed" in str(e):
+                        _net_fail = True
                         logger.warning(f"[TELEGRAM] Skipping send to {admin_id}: Event loop is closed.")
                         # This admin_id cannot be reached right now, no need to retry.
                         break
@@ -3592,6 +3708,9 @@ class TradingTelegramBot:
             )
         else:
             logger.error("[TELEGRAM] Failed to send to any admin")
+            if _keep and _net_fail:
+                self.keep_for_later((message, parse_mode, disable_preview), message[:60])   # B14: sent once it is back
+        return success_count > 0
 
     def _b13_usdjpy(self):
         """B13 item 18 (Desire 5 Oct): a live USDJPY price from MT5 (the bot's own connection), to show yen sums in

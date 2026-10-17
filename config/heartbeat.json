@@ -35,7 +35,9 @@
       "tag": "[CLOCK]",
       "min": 1,
       "window_min": 43200,
-      "note": "once per process"
+      "note": "once per process",
+      "enabled": false,
+      "retired": "B14 (Desire 16 Oct): could never fire -- skipped for 30 days after every start, and any [CLOCK] line (even SERVER OFFSET) counted as fine; b14.clock_wrong and b14.clock_unchecked replace it"
     },
     {
       "id": "gear.read",
@@ -722,24 +724,6 @@
       "note": "B8-12 -- a council must never judge against a pass mark of 0"
     },
     {
-      "id": "replayer.runs",
-      "type": "file_fresh",
-      "file": "logs/replayer_arms_*.json",
-      "window_min": 11520,
-      "enabled": false,
-      "note": "B8-9: threshold met 22 Sep; the weekly run writes the arms files; 8-day window so a weekly run never looks late",
-      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
-    },
-    {
-      "id": "rl1.proposals_file",
-      "type": "file_fresh",
-      "file": "logs/rl1_proposals.jsonl",
-      "window_min": 11520,
-      "enabled": false,
-      "note": "B8-9: the bandit stamps every run, so this proves it ran",
-      "retired": "B13 item 3 (Desire 5 Oct), applied by B14"
-    },
-    {
       "id": "ns.alive",
       "type": "cadence",
       "tag": "[NS] ",
@@ -948,36 +932,6 @@
       "enabled": true
     },
     {
-      "id": "b14.walls_failed",
-      "no_warmup": true,
-      "type": "cadence",
-      "tag": "[NS-WALLS]",
-      "max": 0,
-      "window_min": 1440,
-      "why": "B14 6.4-6.5: the lock / staircase check could not run",
-      "enabled": true
-    },
-    {
-      "id": "b14.stair_failed",
-      "no_warmup": true,
-      "type": "cadence",
-      "tag": "[NS-STAIR-FAIL]",
-      "max": 0,
-      "window_min": 1440,
-      "why": "B14 6.5: a 1H close did not reach the staircase",
-      "enabled": true
-    },
-    {
-      "id": "b14.stop_hold_walls",
-      "no_warmup": true,
-      "type": "cadence",
-      "tag": "[NS-STOP-HOLD] .* ns_wall",
-      "max": 0,
-      "window_min": 1440,
-      "why": "B14 6.7: a lock or staircase move held back by the guard (it must reach MT5)",
-      "enabled": true
-    },
-    {
       "id": "b14.telegram_cmds",
       "no_warmup": true,
       "type": "cadence",
@@ -986,28 +940,130 @@
       "window_min": 1440,
       "why": "B14 (3.1 knock-on): Telegram close commands must run between looks",
       "enabled": true
+    },
+    {
+      "id": "b14.startup_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[B14] START-UP FAILED",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (16 Oct): the settings step at start-up raised -- the rules file's own values are used",
+      "enabled": true
+    },
+    {
+      "id": "b14.settings_refused",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[B14] SETTING REFUSED",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (16 Oct): a value in phase_config.b14_tuning the rules refused (today's value is used)",
+      "enabled": true
+    },
+    {
+      "id": "b14.ladder_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[NS-LADDER-FAIL]",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (15 Oct): the ladder step must never raise -- if it did, a trade's stop would quietly stop climbing",
+      "enabled": true
+    },
+    {
+      "id": "b14.no_map",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[B14] .*no line map",
+      "max": 4,
+      "window_min": 1440,
+      "note": "B14 (15 Oct): the line target or the MA witness could not read the map -- a few at start-up are normal",
+      "enabled": true
+    },
+    {
+      "id": "b14.weekly_box",
+      "type": "file_fresh",
+      "file": "logs/b14_box_test_*.txt",
+      "window_min": 11520,
+      "note": "B14 (16 Oct): the Saturday job's box test writes its report every week (8-day window)",
+      "enabled": true
+    },
+    {
+      "id": "b14.learner_ran",
+      "type": "file_fresh",
+      "file": "logs/rl/b14_rl_*.txt",
+      "window_min": 11520,
+      "note": "B14 (16 Oct): the Saturday job's learner writes its report every week (8-day window)",
+      "enabled": true
+    },
+    {
+      "id": "b14.clock_wrong",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[CLOCK] .*SERVER OFFSET",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (Desire 16 Oct): MT5's clock is more than 15 min off real time -- every 4H candle shifts",
+      "enabled": true
+    },
+    {
+      "id": "b14.clock_unchecked",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[CLOCK] could not compare",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (Desire 16 Oct): the start-up clock check itself failed -- the clock is unchecked",
+      "enabled": true
+    },
+    {
+      "id": "b14.startup_checks_failed",
+      "no_warmup": true,
+      "type": "cadence",
+      "tag": "[CONFIG] start-up checks failed",
+      "max": 0,
+      "window_min": 1440,
+      "note": "B14 (Desire 16 Oct): the start-up safety checks crashed (was a log line only)",
+      "enabled": true
+    },
+    {
+      "id": "b14.nightly_summary",
+      "type": "file_fresh",
+      "file": "logs/b13_alarm_summary_*.txt",
+      "window_min": 2880,
+      "note": "B14 (Desire 16 Oct): the nightly alarm summary (tools/b14_task.ps1, 00:10 box time) writes its file every night",
+      "enabled": true
+    },
+    {
+      "id": "b14.weekly_forward",
+      "type": "file_fresh",
+      "file": "logs/b14_forward_*.txt",
+      "window_min": 11520,
+      "note": "B14 (Desire 16 Oct): the Saturday job's weekly forward report writes its file every week (8-day window)",
+      "enabled": true
     }
   ],
-  "daily_break_utc": {
+  "daily_break_ny": {
     "GOLD": [
-      "21:50",
-      "23:15"
-    ],
-    "USTEC": [
-      "21:50",
-      "23:15"
-    ],
-    "USOIL": [
-      "21:50",
-      "23:15"
+      "16:50",
+      "18:15"
     ],
     "SILVER": [
-      "21:50",
-      "23:15"
+      "16:50",
+      "18:15"
+    ],
+    "USTEC": [
+      "16:50",
+      "18:15"
+    ],
+    "USOIL": [
+      "16:50",
+      "18:15"
     ],
     "JP225": [
-      "20:20",
-      "21:40"
+      "16:50",
+      "18:15"
     ]
   }
 }

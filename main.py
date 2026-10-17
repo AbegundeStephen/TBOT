@@ -752,6 +752,48 @@ class TradingBot:
         self.autotrainer = None
         self.calendar_updater = None
 
+    def _clock_check(self, first=True):
+        """PPL S11d: MT5's server clock against real time (UTC). 4H boundaries are UTC-anchored; a broker server clock
+        offset from UTC silently shifts every 4H close. Said as "[CLOCK] ..."; the watchdog alarms on "SERVER OFFSET" and
+        on "could not compare" (b14.clock_wrong / b14.clock_unchecked, Desire 16 Oct).
+        B14 (Desire 16 Oct): moved out of the start-up code so the trading cycle can run it again (first=False):
+          - a weekend start (GOLD shut: its last tick is Friday's close, a "gap" means nothing -- B6-9) used to leave the
+            clock unchecked until the next start; now it is checked once GOLD's price moves;
+          - a gap of more than 15 min is said as SERVER OFFSET only when a NEWER GOLD price shows the same gap (within
+            5 min) -- a real offset stays the same, while a stale price (the nightly pause, a slow open) does not move,
+            so a start in GOLD's nightly pause can never raise a false alarm."""
+        try:
+            import MetaTrader5 as _mt5, datetime as _dt
+            _t = _mt5.symbol_info_tick("XAUUSDm")
+            _tick = _dt.datetime.fromtimestamp(_t.time, _dt.timezone.utc).replace(tzinfo=None)
+            _now = _dt.datetime.utcnow()
+            _gap = (_now - _tick).total_seconds()
+            if first and not MarketHours.should_trade("gold"):
+                # B6-9: on a weekend start GOLD's last tick is Friday's
+                # close -- a 24h+ "gap" is the market being shut, not a
+                # server offset (19 Sep 23:20: gap 87,726s, false alarm).
+                logger.info("[CLOCK] skipped — GOLD market closed (last tick %s); "
+                            "the check runs again once GOLD's price moves", _tick)
+                self._clock_pending = (_tick, None)
+                return
+            if abs(_gap) <= 900:
+                self._clock_pending = None
+                logger.info("[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (server=UTC)", _tick, _now, _gap)
+                return
+            _prev = getattr(self, "_clock_pending", None)
+            if _prev is not None and _prev[1] is not None and _tick > _prev[0] and abs(_gap - _prev[1]) <= 300:
+                self._clock_pending = None
+                logger.warning("[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (SERVER OFFSET — 4H boundaries may be wrong; the "
+                               "same gap on two GOLD prices)", _tick, _now, _gap)
+                return
+            if _prev is None or _prev[1] is None or _tick > _prev[0]:
+                logger.info("[CLOCK] gap %.0fs to the last GOLD price (%s) -- checked again with a newer price before "
+                            "anything is said", _gap, _tick)
+                self._clock_pending = (_tick, _gap)
+        except Exception as _ce:
+            self._clock_pending = None
+            logger.warning("[CLOCK] could not compare MT5 tick to UTC: %s", _ce)
+
     def initialize_exchanges(self):
         """
         ✅ FIXED: Initialize exchanges and link handlers to portfolio
@@ -779,27 +821,9 @@ class TradingBot:
                 if self.data_manager.initialize_mt5():
                     logger.info(f"[OK] MT5 connection established for: {', '.join(assets_by_exchange['mt5'])}")
                     mt5_initialized = True
-                    # PPL S11d: server-clock sanity check. 4H boundaries are
-                    # UTC-anchored; a broker server clock offset from UTC
-                    # silently shifts every 4H close this batch measures against.
-                    try:
-                        import MetaTrader5 as _mt5, datetime as _dt
-                        _t = _mt5.symbol_info_tick("XAUUSDm")
-                        _tick = _dt.datetime.fromtimestamp(_t.time, _dt.timezone.utc).replace(tzinfo=None)
-                        _now = _dt.datetime.utcnow()
-                        _gap = (_now - _tick).total_seconds()
-                        if not MarketHours.should_trade("gold"):
-                            # B6-9: on a weekend start GOLD's last tick is Friday's
-                            # close -- a 24h+ "gap" is the market being shut, not a
-                            # server offset (19 Sep 23:20: gap 87,726s, false alarm).
-                            logger.info("[CLOCK] skipped — GOLD market closed (last tick %s); "
-                                        "the check runs at the next start with GOLD open", _tick)
-                        else:
-                            (logger.warning if abs(_gap) > 900 else logger.info)(
-                                "[CLOCK] MT5 tick=%s utc=%s gap=%.0fs (%s)", _tick, _now, _gap,
-                                "server=UTC" if abs(_gap) <= 900 else "SERVER OFFSET — 4H boundaries may be wrong")
-                    except Exception as _ce:
-                        logger.warning("[CLOCK] could not compare MT5 tick to UTC: %s", _ce)
+                    # PPL S11d: server-clock sanity check (B14, Desire 16 Oct: now TradingBot._clock_check, so the
+                    # trading cycle can run it again after a weekend start or an unclear first reading)
+                    self._clock_check()
                 else:
                     logger.error("[FAIL] Failed to initialize MT5")
                     # Disable all MT5 assets if connection fails
@@ -1411,6 +1435,7 @@ class TradingBot:
                 db_manager=self.db_manager,
                 ai_validator=self.ai_validator,
                 telegram_bot=self.telegram_bot,
+                notify=self._send_telegram_notification,   # B14 (Desire 16 Oct): the mood messages are really sent
             )
 
             logger.info("[MTF] ✅ Multi-Timeframe Regime Detection Ready")
@@ -3075,47 +3100,47 @@ class TradingBot:
         """
         Target function for the dedicated Telegram thread.
         This function blocks the thread, keeping it alive for continuous operation.
+        B14 (Desire 16 Oct): if Telegram's loop stops while the bot runs (a crash), it is started again -- after 30 s,
+        then 60, 120, 300 and at most 600 s between tries -- so alerts kept meanwhile go out once it is back. It used to
+        stay down until the next bot restart. Never restarted once the bot is stopping or Telegram was asked to stop.
         """
-        try:
-            if self.telegram_bot:
+        _wait14 = 30
+        while True:
+            _t014 = time.time()
+            try:
+                if not self.telegram_bot:
+                    return
                 logger.info("[TELEGRAM] Starting Telegram polling loop in dedicated thread.")
                 self.telegram_bot.run_polling()
                 logger.info("[TELEGRAM] Telegram polling loop has finished.")
-        except Exception as e:
-            logger.error(f"[TELEGRAM] Critical error in dedicated Telegram thread: {e}", exc_info=True)
+            except Exception as e:
+                logger.error(f"[TELEGRAM] Critical error in dedicated Telegram thread: {e}", exc_info=True)
+            if getattr(self, "_shutdown_in_progress", False) or getattr(self.telegram_bot, "_stop_asked", False):
+                return
+            if time.time() - _t014 > 3600:
+                _wait14 = 30                      # it ran for a while: the waits start again from 30 s
+            logger.error("[TELEGRAM] RESTART: the Telegram loop stopped while the bot runs -- starting it again in %d s "
+                         "(%d alert(s) kept meanwhile)", _wait14, self.telegram_bot.waiting_count()
+                         if hasattr(self.telegram_bot, "waiting_count") else -1)
+            time.sleep(_wait14)
+            _wait14 = min(_wait14 * 2 if _wait14 < 120 else (300 if _wait14 < 300 else 600), 600)
 
     def _send_telegram_notification(self, coro):
-        """
-        ✅ FIXED: Send notification safely from main thread to Telegram's event loop
-        """
-        if not self.telegram_bot or not self.telegram_bot._is_ready:
-            logger.debug("[TELEGRAM] Bot not ready, queueing notification")
-            if hasattr(self.telegram_bot, '_message_queue'):
-                self.telegram_bot._message_queue.append(str(coro))
+        """Send a notification from any thread to Telegram's loop.
+        B14 (Desire 16 Oct): through the Telegram bot's post() -- Telegram not ready (start-up, a crash, an outage) ->
+        the alert is KEPT and sent, oldest first, once Telegram is back (it used to be dropped: the old queue stored
+        only the coroutine's name and nothing read it). Waits up to 15 s, but never cancels the send (that cut the
+        B13 item 26 retries short)."""
+        _tg = self.telegram_bot
+        if _tg is None:
+            if asyncio.iscoroutine(coro):
+                coro.close()
+            logger.debug("[TELEGRAM] no Telegram bot -- notification not sent")
             return
-
         try:
-            loop = self.telegram_bot._current_loop
-
-            if not loop or loop.is_closed():
-                logger.warning("[TELEGRAM] Event loop is closed or unavailable, cannot send notification.")
-                return
-
-            # ✅ Submit coroutine to the bot's event loop
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-
-            # Wait for completion with timeout
-            try:
-                future.result(timeout=15.0)
-                logger.debug("[TELEGRAM] Notification sent successfully")
-            except TimeoutError:
-                logger.warning("[TELEGRAM] Notification timeout (15s)")
-                future.cancel()
-            except Exception as e:
-                logger.error(f"[TELEGRAM] Notification error: {e}")
-
+            _tg.post(coro, wait=15.0)
         except Exception as e:
-            logger.error(f"[TELEGRAM] Failed to send notification: {e}", exc_info=True)
+            logger.error(f"[TELEGRAM] Failed to hand over a notification: {e}", exc_info=True)
 
     @staticmethod
     def _cs_field(details, name, default=None):
@@ -3218,8 +3243,9 @@ class TradingBot:
                 gate_id = "governor"
             elif "ny_open_block" in _rr:
                 gate_id = "ny_open"
-            elif "stale price" in (block_source or "").lower():
-                gate_id = "stale_price"
+            elif ("stale price" in (block_source or "").lower() or "stale_price" in _rr
+                  or "stale price" in (block_reason or "").lower()):
+                gate_id = "stale_price"           # B14 (16 Oct): the council's reason is "stale_price_<n>min"
             elif "paper-only market" in _rr:
                 # B12 decision 7 (ns_paper_markets, e.g. AUDJPY): blocked on
                 # every cycle forever by design -- gates.json already carries
@@ -3271,7 +3297,7 @@ class TradingBot:
     def _b7_telegram(self, text):
         try:
             _tg = getattr(self, "telegram_bot", None)
-            if _tg and getattr(_tg, "_is_ready", False):
+            if _tg:                               # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
                 _coro = _tg.send_message(text=text, parse_mode="HTML")
                 if _coro:
                     self._send_telegram_notification(_coro)
@@ -3748,7 +3774,12 @@ class TradingBot:
                 self._blocked_seen = {}
             _now_gk = time.time()
             _last_seen = self._blocked_seen.get(_block_key)
-            if _last_seen is not None and (_now_gk - _last_seen) < 4 * 3600:
+            # B14 (found 14 Oct, confirmed on the box 15 Oct: 291 lane C practice trades since 1 Oct, every one the
+            # 'std' way, the 'wide' way never once): this repeat filter is for a gate blocking the SAME signal every
+            # cycle. Lane C's control opens are deliberate -- one call per side and per way of trading, with one key
+            # (asset, side, no proof, 'lane_c') -- so the filter was taking every second way and any second pair
+            # within 4 hours. Lane C (bypass_guards) skips it; every other caller keeps it exactly as before.
+            if not bypass_guards and _last_seen is not None and (_now_gk - _last_seen) < 4 * 3600:
                 logger.debug(f"[GATE-1] repeat block {asset_name} {gate_id} (suppressed)")
                 return
             self._blocked_seen[_block_key] = _now_gk
@@ -4022,8 +4053,8 @@ class TradingBot:
         """
         if signal == 0:
             return  # genuine hold, nothing to report
-        if not self.telegram_bot or not self.telegram_bot._is_ready:
-            return
+        if not self.telegram_bot:
+            return                                # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
 
         # ✅ FIX: Dedup — only send when the blocked direction or reason changes.
         # Without this, the same "BTC SELL blocked by no_sniper_confirmation"
@@ -4642,44 +4673,19 @@ class TradingBot:
             if _n:
                 logger.info("[SHADOW] %d practice trade(s) closed by the trade loop", _n)
 
-    def _b14_warn(self, key, fmt, *args):
-        """A failure line at most once every 10 minutes per key (the trade loop retries every few seconds)."""
-        _seen = self.__dict__.setdefault("_b14_warned", {})
-        if time.time() - _seen.get(key, 0.0) >= 600:
-            _seen[key] = time.time()
-            logger.warning(fmt, *args)
-
-    def _b14_hour_feed(self):
-        """B14 item 6.5: hands each B14 trade the newest closed 1H candle within seconds of its close, so the
-        staircase steps on it (checked every 15 s; only trades taken under the B14 rules)."""
-        _now = time.time()
-        if _now - getattr(self, "_b14_hf_last", 0.0) < 15:
-            return
-        self._b14_hf_last = _now
-        _todo = [p for p in list((self.portfolio_manager.positions or {}).values())
-                 if getattr(getattr(p, "trade_manager", None), "ns_b14", False)]
-        if not _todo:
-            return
-        try:
-            import MetaTrader5 as _mt5_14
-        except Exception as _ie:
-            self._b14_warn("mt5", "[NS-STAIR-FAIL] MT5 module not available: %s", _ie)
-            return
-        _utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
-        for _p in _todo:
-            try:
-                _r = _mt5_14.copy_rates_from_pos(self._resolve_symbol(_p.asset), _mt5_14.TIMEFRAME_H1, 0, 3)
-                if _r is None or len(_r) == 0:
-                    self._b14_warn("rates|" + _p.asset, "[NS-STAIR-FAIL] %s: no 1H candles from MT5", _p.asset)
-                    continue
-                _closed = [x for x in _r if pd.Timestamp(int(x["time"]), unit="s") + pd.Timedelta(hours=1) <= _utc]
-                if not _closed:
-                    continue
-                _x = _closed[-1]
-                _p.trade_manager.b14_hour_close(pd.Timestamp(int(_x["time"]), unit="s") + pd.Timedelta(hours=1),
-                                                float(_x["close"]))
-            except Exception as _fe:
-                self._b14_warn("feed|" + _p.asset, "[NS-STAIR-FAIL] %s: 1H close not handed over: %s", _p.asset, _fe)
+    @staticmethod
+    def _b14_chart_caption(asset_name, _cs, why=None):
+        """Desire 16 Oct ("why does this chart pop into Telegram at random times?"): the chart says why it was sent --
+        the package's decision(s) of this look (its first two lines, without the HTML), or the trade just opened. The
+        chart's own panel shows the latest PROOF, which can be weeks older than the decision."""
+        import re as _re_c
+        parts = []
+        for _ev in (getattr(_cs, "pkg_events", None) or []):
+            _ln = [x.strip() for x in _re_c.sub(r"<[^>]+>", "", str((_ev or {}).get("text", ""))).split("\n") if x.strip()]
+            if _ln:
+                parts.append(": ".join(_ln[:2]))
+        _w = why or "; ".join(parts)
+        return ("%s -- combined chart%s" % (asset_name, (" -- " + _w) if _w else ""))[:1000]
 
     def _b14_pkg_chart(self, asset_name, df, _cs):
         """B14 item 1.1b: the combined chart goes out with a package decision made in the first look too."""
@@ -4688,7 +4694,7 @@ class TradingBot:
             _cp = _b14_cw(asset_name, df, _cs,
                           symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
             if _cp and getattr(self.telegram_bot, "send_photo_file", None):
-                self._send_telegram_notification(self.telegram_bot.send_photo_file(_cp, "%s -- combined chart" % asset_name))
+                self._send_telegram_notification(self.telegram_bot.send_photo_file(_cp, self._b14_chart_caption(asset_name, _cs)))
         except Exception as _ce14:
             logger.warning("[COMBINED-CHART] %s: not sent with the package decision: %s", asset_name, _ce14)
 
@@ -4720,21 +4726,29 @@ class TradingBot:
                         "ON" if _rk.get("daily_loss_brakes_enabled", True) else "OFF",
                         "ON" if _pf.get("profit_lock_enabled", True) else "OFF",
                         100 * float(_pf.get("max_drawdown", 0.15) or 0), _rk.get("max_loss_streak", 5))
-            logger.info("[B14] new rules switch (phase_config.b14_rules_enabled): %s",
-                        "ON" if _pc.get("b14_rules_enabled", False) else "OFF -- the B13 rules trade")
-            # B15 Part 3 (Desire 12 Oct): the start-up line says whether the B15 rules trade, and what they are
-            from src.execution.ns_engine import RULES_V as _rv15, B14_KNOBS as _bk15
-            _k15 = dict(_bk15, **(_pc.get("b14_knobs") or {}))
-            logger.info("[B15] rules %s: %s", _rv15, (
-                "ON -- big lines (a major 4H swing) keep the hourly proof; small lines, and big-line signals sent to "
-                "wait, are proven on the 4H clock (a 4H retest, then a 4H close past the peak; up to 7 + 7 days); no "
-                "lock at walls; staircase %s; a 4H stop too wide: %s; clock %s; clearance %s" % (
-                    "from the entry" if _k15.get("stair", True) else "OFF", _k15.get("wide"), _k15.get("clock"),
-                    _k15.get("trigger_clear")))
-                if _pc.get("b14_rules_enabled", False) else "OFF -- the B13 rules trade (the B15 code is installed, "
-                "switched off: phase_config.b14_rules_enabled)")
         except Exception as _sc14:
             logger.warning("[CONFIG] start-up checks failed: %s", _sc14)
+        # B14 (Desire 15 Oct): the start-up line says whether the B14 rules trade, and what they are.
+        # Desire 16 Oct: the settings come from phase_config.b14_tuning, read once here, before the first look;
+        # a refused value keeps today's and is said as an ERROR (the watchdog counts it). Its own step: a failure in
+        # the checks above must not leave b14_tuning unread (the rules would quietly run on the file's own values),
+        # and a failure here is an ERROR the watchdog counts (b14.startup_failed), not a quiet warning.
+        try:
+            from src.execution import b14_rules as _b14m
+            _pc14 = self.config.get("phase_config", {}) or {}
+            _vals14n, _chg14n, _bad14n = _b14m.apply_settings(_pc14.get("b14_tuning"))
+            for _k14n, _why14n in _bad14n:
+                logger.error("[B14] SETTING REFUSED: phase_config.b14_tuning.%s -- %s -- today's value kept", _k14n, _why14n)
+            logger.info("[B14] settings in force: %s%s", _b14m.settings_text(_vals14n),
+                        (" | changed from today's: " + "; ".join("%s %s -> %s" % c for c in _chg14n)) if _chg14n else
+                        " | all as written in the rules file")
+            logger.info("[B14] rules %s: %s", _b14m.RULES_TAG, _b14m.live_rules_text(_pc14))
+        except Exception as _e14n:
+            try:
+                _b14m.apply_settings(None)                   # the rules file's own values, never a half-applied mix
+            except Exception:
+                pass
+            logger.error("[B14] START-UP FAILED: %s -- the rules file's own settings are used", _e14n)
 
     def run_trading_cycle(self):
         """Execute one complete trading cycle with VTM support"""
@@ -4743,6 +4757,8 @@ class TradingBot:
             if not self.config.get("trading", {}).get("enabled", True):
                 logger.info("[CYCLE] ⏸ Trading is GLOBALLY DISABLED. Skipping cycle.")
                 return
+            if getattr(self, "_clock_pending", None) is not None:
+                self._clock_check(first=False)   # B14 (Desire 16 Oct): the clock check a start could not finish
 
             # T3.5: Refresh BTC funding rate (self-throttles to every 8 hours)
             try:
@@ -5705,12 +5721,9 @@ class TradingBot:
                         except Exception as _se:
                             logger.error(f"[VTM LOOP] Periodic state save failed: {_se}")
 
-                # B14 item 3.3: practice exits every few seconds, like live trades; B14 item 6.5: new 1H closes reach
-                # the staircase of trades taken under the B14 rules within seconds
+                # B14 item 3.3: practice exits every few seconds, like live trades
                 self._vtm_last_call = "b14_practice_tick"
                 self._b14_practice_tick()
-                self._vtm_last_call = "b14_hour_feed"
-                self._b14_hour_feed()
 
                 # Sleep until the next update
                 time.sleep(update_interval)
@@ -6431,7 +6444,7 @@ class TradingBot:
                     logger.error(f"[ERROR] Failed to refresh capital: {e}")
 
             # Send daily summary via Telegram
-            if self.telegram_bot and self.telegram_bot._is_ready:
+            if self.telegram_bot:                 # B14 (16 Oct): Telegram not ready -> kept, sent once it is back
                 try:
                     self._send_telegram_notification(
                         self.telegram_bot.send_daily_summary()
@@ -6858,28 +6871,24 @@ class TradingBot:
     def check_entry_window(self, asset_name: str):
         """B6-3: may a NEW entry be placed right now? Returns (True, "") or
         (False, reason). Moved unchanged from check_market_hours: the
-        21:30-23:30 UTC rollover dead zone and the per-asset preferred-session
+        rollover dead zone (B14: 16:30-18:30 New York time) and the per-asset preferred-session
         window (trading.session_filter_enabled). BTC has no window."""
         asset_name_upper = asset_name.upper()
         asset_cfg = self.config["assets"].get(asset_name, {})
         if asset_cfg.get("asset_type", "") == "crypto" or "BTC" in asset_name_upper:
             return True, ""
 
-        # Rollover Dead Zone (21:30 - 23:30 UTC): spreads explode, liquidity vanishes.
+        # Rollover Dead Zone (16:30 - 18:30 New York time -- B14, Desire 16 Oct): spreads explode, liquidity vanishes.
         if MarketHours.is_rollover_dead_zone():
             current_hour = datetime.now().hour
             if self.last_market_status_log.get(asset_name) != current_hour:
-                logger.info(f"[MARKET] {asset_name}: Rollover Dead Zone (21:30-23:30 UTC) — Blocking entry.")
+                logger.info(f"[MARKET] {asset_name}: Rollover Dead Zone (16:30-18:30 New York) — Blocking entry.")
                 self.last_market_status_log[asset_name] = current_hour
-            return False, "rollover dead zone (21:30-23:30 UTC)"
+            return False, "rollover dead zone (16:30-18:30 New York)"
 
-        # B13 item 27 (Desire 5 Oct): JP225 also pauses nightly at 22:30-23:30 box time (20:30-21:30 UTC) -- no new
-        # entries from 20:20 to 21:40 UTC (with the rollover dead zone above, that blocks 20:20-23:30 UTC)
-        if asset_name_upper == "JP225":
-            _g27 = MarketHours.get_gmt_time()
-            _m27 = _g27.hour * 60 + _g27.minute
-            if _g27.weekday() < 5 and 20 * 60 + 20 <= _m27 < 21 * 60 + 40:
-                return False, "JP225 nightly pause (20:20-21:40 UTC)"
+        # B13 item 27's own JP225 window (20:20-21:40 UTC) is gone (B14, Desire 16 Oct): the box's 30-minute candles show
+        # JP225 pauses 17:00-18:00 New York like the other CFDs (21:00-22:00 UTC in summer, 22:00-23:00 in winter), and
+        # the rollover dead zone above (16:30-18:30 New York) covers it in both seasons.
 
         # Preferred session filter -- per asset (e.g. no GBPAUD in late Asia,
         # no GOLD outside London/NY). trading.session_filter_enabled in config.
@@ -7488,7 +7497,7 @@ class TradingBot:
                         from src.ai.combined_chart import write_combined as _b13_cw3
                         _b13_cp3 = _b13_cw3(asset_name, df, _cs, symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
                         if _b13_cp3 and getattr(self.telegram_bot, "send_photo_file", None):
-                            self._send_telegram_notification(self.telegram_bot.send_photo_file(_b13_cp3, "%s -- combined chart" % asset_name))
+                            self._send_telegram_notification(self.telegram_bot.send_photo_file(_b13_cp3, self._b14_chart_caption(asset_name, _cs)))
                     except Exception as _b13_ce3:
                         logger.warning("[COMBINED-CHART] %s: not sent with the package decision: %s", asset_name, _b13_ce3)
                 # B12 (Desire 28 Sep, rulings 1A and 2): the council votes; a new-engine proof decides (advisory
@@ -7600,10 +7609,9 @@ class TradingBot:
             # post-REF-1, all one EURUSD level, one measured outcome, a
             # loss), being able to isolate exactly these trades afterwards
             # is the main protection against the ruling being wrong.
-            # Same object-access pattern as the Lane B block just below,
-            # which already reads _lane_b_intent off these same objects
-            # successfully -- confirmed live, not the aggregator's own
-            # internal instances.
+            # These are the same strategy objects the trading path reads
+            # (confirmed live in Sep -- not the aggregator's own internal
+            # instances).
             try:
                 for _xl_obj in (
                     self.strategies.get(asset_name, {}).get("trend_following"),
@@ -7616,78 +7624,6 @@ class TradingBot:
                         break
             except Exception as _xl_err:
                 logger.debug(f"[LANE-1] {asset_name}: cross-lane stamp failed: {_xl_err}")
-
-            # ── LANES L4a: Lane B capture ────────────────────────────────────
-            # Both lanes stash a suppressed intent when a completed proof exists
-            # but belongs to the other lane. One shadow per PROOF, not per cycle
-            # -- the same suppression re-fires every ~5 minutes for hours, and
-            # without this guard 650 cycles would look like 650 samples.
-            try:
-                # B8-3: phase_config.lane_b_enabled (true) now really switches lane B.
-                _b8_lane_b_on = bool(self.config.get("phase_config", {}).get("lane_b_enabled", True))
-                for _lane_obj, _lane_tag in ((
-                    (self.strategies.get(asset_name, {}).get("trend_following"), "B-TF"),
-                    (self.strategies.get(asset_name, {}).get("mean_reversion"), "B-MR"),
-                ) if _b8_lane_b_on else ()):
-                    _intent = getattr(_lane_obj, "_lane_b_intent", None) if _lane_obj else None
-                    # MEASURE-2 S3: Lane B has never fired. Two candidates:
-                    #   (A) no ownership suppressions have occurred at all
-                    #   (B) the aggregator runs its OWN strategy instances, so
-                    #       the intent is set on one object and read from another
-                    # Log enough to tell them apart instead of guessing. Fires
-                    # once per asset per cycle at DEBUG; promote to INFO for a
-                    # day if the question is still open.
-                    # REF-1 SEG K4: promoted DEBUG -> INFO. 6 [LANE-B] captures
-                    # logged, 0 records ever landed on disk -- this line has
-                    # never actually been seen.
-                    #
-                    # STOP-2 SEG H: this diagnostic answered on 8 Sep --
-                    # intent=none on both B-TF and B-MR across 84 lines,
-                    # meaning no suppressions are occurring rather than
-                    # shadows failing to open. Kept at INFO because it is
-                    # low-volume and it is the only instrument on the
-                    # question of whether lane ownership costs trades.
-                    logger.info(
-                        "[LANE-B-DIAG] %s %s: obj=%s id=%s intent=%s",
-                        asset_name, _lane_tag,
-                        type(_lane_obj).__name__ if _lane_obj else "None",
-                        id(_lane_obj) if _lane_obj else 0,
-                        "SET" if _intent else "none",
-                    )
-                    if not _intent or not _intent.get("signal"):
-                        continue
-                    _proof_key = (
-                        f"{asset_name}|{_lane_tag}|{_intent.get('brc_kind')}"
-                        f"|{_intent.get('brc_direction')}|{details.get('setup_ref', 0)}"
-                    )
-                    if not hasattr(self, "_lane_b_seen"):
-                        self._lane_b_seen = {}
-                    if _proof_key in self._lane_b_seen:
-                        continue
-                    self._lane_b_seen[_proof_key] = time.time()
-                    if len(self._lane_b_seen) > 500:
-                        _cutoff = time.time() - 86400
-                        self._lane_b_seen = {
-                            k: v for k, v in self._lane_b_seen.items() if v > _cutoff
-                        }
-                    logger.info(
-                        f"[LANE-B] {asset_name}: capturing {_lane_tag} suppressed "
-                        f"signal={_intent['signal']:+d} "
-                        f"(proof={_intent.get('brc_kind')} "
-                        f"dir={_intent.get('brc_direction')} "
-                        f"same_dir={_intent.get('same_direction')})"
-                    )
-                    _lane_b_details = dict(details)
-                    _lane_b_details["reasoning"] = _intent["reason"]
-                    _lane_b_details["lane_b_intent"] = _intent
-                    self._shadow_open_blocked(
-                        asset_name, _intent["signal"], _lane_b_details, df,
-                        current_price, f"lane_b_{_intent['reason']}", asset_cfg,
-                        lane=_lane_tag,
-                        gate_id="lane_b", gate_stage="control",
-                    )
-            except Exception as _lb_err:
-                logger.warning(f"[LANE-B] {asset_name}: capture failed: {_lb_err}")
 
             # Dashboard Charts section: save the exact same decision chart
             # /chart renders on demand, automatically every cycle, so the
@@ -9179,8 +9115,7 @@ class TradingBot:
                         )
                         if (
                             new_pos
-                            and self.telegram_bot
-                            and self.telegram_bot._is_ready
+                            and self.telegram_bot          # B14 (16 Oct): not ready -> kept, sent once it is back
                         ):
                             try:
                                 leverage = getattr(new_pos, "leverage", 1)
@@ -9324,7 +9259,8 @@ class TradingBot:
                                 _b13_cp = _b13_cw2(asset_name, df, details.get("composite_state") if isinstance(details, dict) else None,
                                                    symbol=(self.config.get("assets", {}).get(asset_name, {}) or {}).get("symbol"))
                                 if _b13_cp and getattr(self.telegram_bot, "send_photo_file", None):
-                                    self._send_telegram_notification(self.telegram_bot.send_photo_file(_b13_cp, "%s -- combined chart" % asset_name))
+                                    self._send_telegram_notification(self.telegram_bot.send_photo_file(
+                                        _b13_cp, self._b14_chart_caption(asset_name, None, why="the trade just opened")))
                             except Exception as _b13_ce2:
                                 logger.warning(f"[COMBINED-CHART] {asset_name}: not sent with the trade: {_b13_ce2}")
                         except Exception as _nsc_e:
