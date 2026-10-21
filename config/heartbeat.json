@@ -426,9 +426,10 @@
       "enabled": true,
       "note": "B4 P6 G6 -- REPLACES the 30 per-gate gate.<id> ledger_seen promises (deleted, same commit): those failed for every gate that legitimately never fired (24-28/56 passing). This is one rule: a gate_id seen in the [HOLD] log this window must also have >=1 ledger row in the same window. Zero log blocks for a gate is not checked at all.",
       "skip_gates": [
-        "ny_open"
+        "ny_open",
+        "stale_price"
       ],
-      "skip_why": "B14 (Desire 8 Oct): ny_open logs a block on cycles with no signal, so no practice row can exist"
+      "skip_why": "B14 (Desire 8 Oct): ny_open logs a block on cycles with no signal, so no practice row can exist. B14 Part 3B (Desire 20 Oct, P2 A): stale_price too -- a pre-direction gate (gates.json), and a block with no signal is recorded, not shadowed (main.py), so it never has a ledger row either"
     },
     {
       "id": "b6.proof_council_cap",

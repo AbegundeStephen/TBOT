@@ -233,6 +233,10 @@ def main():
         "priced on the 30-minute candles at the smallest lot after the spread. Compare with what MT5 did: live trades "
         "missing from the rules that were ON that week mean a live-only check stopped them (health, session, MT5).")
     say("   the week's B14 log lines (start-up, ladder moves, clearance, re-arms): the B14 weekly section of this report")
+    say("   READ S0 WITH CARE (Desire 20 Oct, W8 A): the B13 rules made their money in one stretch. On the 11 months "
+        "before the last 16 (14 Jul 2024 - 13 Jun 2025) they lost: 165 trades, 32.1% won, -11.6R, -$202, worst drop "
+        "26.5R (the 16 Oct test, today's settings). A good S0 week is B13 in its good stretch, not proof that B13 is "
+        "the better rule set.")
     say("\n=== END OF THE B14 WEEKLY FORWARD REPORT (%.0f s) ===" % (time.time() - T0))
     os.makedirs("logs", exist_ok=True)
     with open(os.path.join("logs", "b14_forward_%s.txt" % BX.STAMP), "w", encoding="utf-8") as f:

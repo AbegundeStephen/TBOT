@@ -2,7 +2,7 @@
 Economic Calendar Updater
 =========================
 Fetches high-impact events from Forex Factory's public JSON feed (no API key
-required), merges them with a hardcoded 2026 anchor schedule for FOMC / NFP /
+required), merges them with a hard-coded 2026-2027 anchor schedule for FOMC / NFP /
 CPI / ECB, and writes the result to config/economic_calendar.json.
 
 The signal aggregator calls reload_calendar() immediately after each write so
@@ -37,13 +37,19 @@ FF_URLS = [
 RELEVANT_CURRENCIES = {"USD", "EUR", "JPY", "AUD", "GBP"}
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ANCHOR SCHEDULE  (hard-coded 2026 dates; FF data overrides where available)
+# ANCHOR SCHEDULE  (hard-coded 2026-2027 dates. FF's own events are added as well: an anchor is left out only when
+# FF has an event on the same day whose name starts the same way -- see _merge)
 #
-# Times are UTC.  EDT = UTC-4 (Mar 8 – Nov 1),  EST = UTC-5 otherwise.
+# B14 Part 3B (Desire 20 Oct 2026, P5 A): the 2027 dates come from the official calendars, checked 20 Oct 2026 --
+# federalreserve.gov (FOMC), ecb.europa.eu (ECB), bls.gov (NFP, CPI), bea.gov (GDP). ADP's 2027 calendar could not be
+# read, so there is no 2027 ADP line. Fixed the same day: FOMC December 2026 is the 9th (not the 16th), CPI December
+# 2026 is the 10th (not the 8th), and the ECB decision is at 14:15 Frankfurt time (it was written as 11:15 UTC).
+#
+# Times are UTC.  EDT = UTC-4 (8 Mar - 1 Nov 2026, 14 Mar - 7 Nov 2027),  EST = UTC-5 otherwise.
 # FOMC 14:00 ET → 18:00 UTC (EDT) / 19:00 UTC (EST)
 # NFP  08:30 ET → 12:30 UTC (EDT) / 13:30 UTC (EST)
 # CPI  08:30 ET → 12:30 UTC (EDT) / 13:30 UTC (EST)
-# ECB  12:15 CET → 11:15 UTC (CEST summer) / 11:15 UTC (CET winter same)
+# ECB  14:15 Frankfurt → 12:15 UTC (CEST, 29 Mar - 25 Oct 2026, 28 Mar - 31 Oct 2027) / 13:15 UTC (CET)
 # ─────────────────────────────────────────────────────────────────────────────
 _ANCHOR: List[Dict] = [
     # ── FOMC ──────────────────────────────────────────────────────────────
@@ -52,7 +58,15 @@ _ANCHOR: List[Dict] = [
     {"datetime": "2026-07-29T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-09-16T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-10-28T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
-    {"datetime": "2026-12-16T19:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2026-12-09T19:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-01-27T19:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-03-17T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-04-28T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-06-09T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-07-28T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-09-15T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-10-27T18:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-12-08T19:00:00Z", "event": "FOMC Rate Decision",    "currency": "USD", "block_hours_before": 2},
     # ── NFP ───────────────────────────────────────────────────────────────
     {"datetime": "2026-05-01T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-06-05T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
@@ -62,6 +76,18 @@ _ANCHOR: List[Dict] = [
     {"datetime": "2026-10-02T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-11-06T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-12-04T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-01-08T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-02-05T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-03-05T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-04-02T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-05-07T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-06-04T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-07-02T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-08-06T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-09-03T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-10-08T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-11-05T12:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-12-03T13:30:00Z", "event": "Non-Farm Payrolls",     "currency": "USD", "block_hours_before": 2},
     # ── CPI ───────────────────────────────────────────────────────────────
     {"datetime": "2026-05-12T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-06-10T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
@@ -70,17 +96,41 @@ _ANCHOR: List[Dict] = [
     {"datetime": "2026-09-09T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-10-13T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-11-10T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
-    {"datetime": "2026-12-08T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2026-12-10T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-01-13T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-02-11T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-03-10T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-04-13T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-05-12T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-06-10T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-07-14T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-08-11T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-09-14T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-10-14T12:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-11-10T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-12-10T13:30:00Z", "event": "US CPI",                "currency": "USD", "block_hours_before": 2},
     # ── ECB ───────────────────────────────────────────────────────────────
     {"datetime": "2026-06-04T11:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
     {"datetime": "2026-07-23T11:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
     {"datetime": "2026-09-10T11:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
-    {"datetime": "2026-10-29T11:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
-    {"datetime": "2026-12-17T11:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2026-10-29T13:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2026-12-17T13:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-02-04T13:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-03-18T13:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-04-29T12:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-06-10T12:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-07-22T12:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-09-09T12:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-10-28T12:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
+    {"datetime": "2027-12-16T13:15:00Z", "event": "ECB Rate Decision",     "currency": "EUR", "block_hours_before": 2},
     # ── US GDP (quarterly advance) ────────────────────────────────────────
     {"datetime": "2026-04-29T12:30:00Z", "event": "US GDP (Q1 Advance)",   "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-07-29T12:30:00Z", "event": "US GDP (Q2 Advance)",   "currency": "USD", "block_hours_before": 2},
     {"datetime": "2026-10-29T12:30:00Z", "event": "US GDP (Q3 Advance)",   "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-01-28T13:30:00Z", "event": "US GDP (Q4 Advance)",   "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-04-29T12:30:00Z", "event": "US GDP (Q1 Advance)",   "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-07-29T12:30:00Z", "event": "US GDP (Q2 Advance)",   "currency": "USD", "block_hours_before": 2},
+    {"datetime": "2027-10-28T12:30:00Z", "event": "US GDP (Q3 Advance)",   "currency": "USD", "block_hours_before": 2},
     # ── ADP Employment ────────────────────────────────────────────────────
     {"datetime": "2026-05-06T12:15:00Z", "event": "ADP Employment",        "currency": "USD", "block_hours_before": 1},
     {"datetime": "2026-06-03T12:15:00Z", "event": "ADP Employment",        "currency": "USD", "block_hours_before": 1},
@@ -90,6 +140,7 @@ _ANCHOR: List[Dict] = [
     {"datetime": "2026-10-07T12:15:00Z", "event": "ADP Employment",        "currency": "USD", "block_hours_before": 1},
     {"datetime": "2026-11-04T13:15:00Z", "event": "ADP Employment",        "currency": "USD", "block_hours_before": 1},
     {"datetime": "2026-12-02T13:15:00Z", "event": "ADP Employment",        "currency": "USD", "block_hours_before": 1},
+    # ADP 2027: not added -- ADP's own calendar could not be read on 20 Oct 2026 (2 Dec 2026 above is not checked either)
 ]
 
 

@@ -11,7 +11,9 @@ from typing import Tuple, Optional
 class MarketHours:
     """Multi-asset market hours helper"""
 
-    # US Stock Market holidays 2025 + 2026
+    # US Stock Market holidays 2025 + 2026 + 2027. B14 Part 3B (Desire 20 Oct 2026, P5 A): 2027 from NYSE's own calendar
+    # (checked 20 Oct 2026), Juneteenth included. This list is read only for the "stocks" market type (US100, NAS100,
+    # SPX); none of the bot's markets use it -- USTEC follows the forex hours. (2025 and 2026 here lack Juneteenth.)
     US_MARKET_HOLIDAYS = [
         "2025-01-01",  # New Year's Day
         "2025-01-20",  # MLK Day
@@ -32,6 +34,17 @@ class MarketHours:
         "2026-09-07",  # Labor Day
         "2026-11-26",  # Thanksgiving
         "2026-12-25",  # Christmas
+        # 2027
+        "2027-01-01",  # New Year's Day
+        "2027-01-18",  # MLK Day
+        "2027-02-15",  # Presidents Day
+        "2027-03-26",  # Good Friday
+        "2027-05-31",  # Memorial Day
+        "2027-06-18",  # Juneteenth (observed)
+        "2027-07-05",  # Independence Day (observed)
+        "2027-09-06",  # Labor Day
+        "2027-11-25",  # Thanksgiving
+        "2027-12-24",  # Christmas (observed)
     ]
 
     # US Stock Market hours (Eastern Time)

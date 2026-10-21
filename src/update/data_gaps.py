@@ -5,8 +5,9 @@ price file was only ever found by chance. This one runs after every hourly updat
 and 4H files of each market and logs one "[DATA-GAP] ..." warning per problem; the watchdog (config/heartbeat.json,
 b14.data_gap) alarms on that line. It only reads files. It never changes them and never raises.
 
-What counts as missing -- a candle the market should have made, by its schedule in NEW YORK time, learnt from
-2.5 years of the box's own hourly candles (1H files to 12 Oct 2026, every market):
+What counts as missing -- a candle the market should have made, by its schedule in NEW YORK time, learnt from about
+2.5 years of MT5's own history, taken from the box on 12 Oct 2026 (its 30-minute candles made hourly; the start
+dates differ by market -- March to May 2024, BTC January 2025):
   BTC        every hour, every day
   EURUSD, GBPAUD, EURJPY, AUDJPY      Sunday 17:00 to Friday 17:00 New York, no daily pause
   GOLD, SILVER, USTEC, USOIL, JP225   Sunday 18:00 to Friday 17:00 New York, paused 17:00-18:00 every evening;
@@ -15,7 +16,8 @@ What counts as missing -- a candle the market should have made, by its schedule 
              for every market except BTC; for the five CFDs also the US market holidays they close early or shut for
              (MLK day, Presidents' day, Good Friday, Memorial day, Juneteenth, 3 and 4 July, Labor day, Thanksgiving and
              the Friday after), from 17:00 New York the evening before to the end of the day.
-Replayed over that whole history (28 Mar 2024 to 12 Oct 2026), the rule reports 8 problems, about 3 a year:
+Replayed over that whole history (from each market's first candle to 12 Oct 2026), the rule reports 8 problems, about
+3 a year:
   AUDJPY 1-11 Oct 2026 (168 hourly candles: MT5's own hourly history has the hole, the daily candles are there),
   BTC 23 Aug 2025 10:00 (1), USOIL 15 Oct 2024, 8 Nov 2024, 2 Dec 2024, 11 Jun 2025 (1 each), SILVER 13 Oct 2025
   01:00-05:00 UTC (a late Sunday open), and USTEC 9 Jan 2025 (US markets shut that day for a national day of mourning
