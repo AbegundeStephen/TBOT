@@ -4,7 +4,7 @@
 # When the log moves again after an alert, it says so once.
 $ErrorActionPreference = "Continue"
 $Root     = "C:\TradingBot\TBOT"
-$TaskName = "PUT-THE-BOT-TASK-NAME-HERE"          # <- Stephen: the bot's Task Scheduler task name (see the plan)
+$TaskName = "TBOT"          # <- Stephen: the bot's Task Scheduler task name (see the plan)
 $Log      = Join-Path $Root "logs\trading_bot.log"
 $State    = Join-Path $Root "data\watchdog_state.json"
 $QuietMin = 10

@@ -2325,7 +2325,7 @@
     },
     "council_suspended": true,
     "ns_engine_days": 75,
-    "b14_new_rules_enabled": false
+    "b14_new_rules_enabled": true
   },
   "btc_volume_source": "binance"
 }
