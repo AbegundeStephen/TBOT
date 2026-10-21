@@ -446,9 +446,23 @@ class TradingTelegramBot:
         # Admin Commands
         self.application.add_handler(CommandHandler("stop_trading", self.cmd_stop_trading))
         self.application.add_handler(CommandHandler("start_trading", self.cmd_start_trading))
-        self.application.add_handler(CommandHandler("resume", self.cmd_resume_trading))
+        # Cleanup (20 Oct): this used to be registered as "resume" too, duplicating the
+        # NS-pause command above -- python-telegram-bot only ever invokes the FIRST
+        # handler registered for a given command string, so cmd_resume_trading (clears
+        # a tripped circuit-breaker/profit-lock override and restarts trading) was
+        # permanently unreachable. Renamed to its own command instead of removed, since
+        # that's the only way to clear those overrides over Telegram.
+        self.application.add_handler(CommandHandler("resume_trading", self.cmd_resume_trading))
         self.application.add_handler(CommandHandler("close_all", self.cmd_close_all))
         self.application.add_handler(CommandHandler("close", self.cmd_close_asset))
+
+        # B14 (20 Oct): visibility into the new B14 rules that the old wall-lock/
+        # staircase commands never had an equivalent for.
+        self.application.add_handler(CommandHandler("b14_status", self.cmd_b14_status))
+        self.application.add_handler(CommandHandler("ladder", self.cmd_ladder))
+        self.application.add_handler(CommandHandler("spring", self.cmd_spring))
+        self.application.add_handler(CommandHandler("gaps", self.cmd_gaps))
+        self.application.add_handler(CommandHandler("rl_suggestions", self.cmd_rl_suggestions))
 
         # Callback Query Handler
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
@@ -613,7 +627,15 @@ class TradingTelegramBot:
             "/modes — Current aggregator mode per asset (council vs perf)\n"
             "/modedetails ASSET — Full mode switch history for one asset\n"
             "/presets — Current aggregator preset per asset\n"
-            "/preset_history — Preset change log\n"
+            "/preset_history — Preset change log\n\n"
+
+            "🧮 <b>B14 Rules</b>\n"
+            "/b14_status — Is the new B14 switch on, and the settings in force\n"
+            "/ladder [ASSET] — R-ladder stop-climb state of open trades\n"
+            "/spring [ASSET] — Package entries waiting at a springboard wall\n"
+            "/gaps — Run the missing-candle check on demand\n"
+            "/rl_suggestions — The learner's latest tuning suggestions\n"
+            "/resume ASSET — Switch an NS-paused market back on (admin)\n"
         )
 
         if is_admin:
@@ -621,7 +643,7 @@ class TradingTelegramBot:
                 "\n🎮 <b>Admin Controls</b>\n"
                 "/start_trading — Resume signal processing\n"
                 "/stop_trading — Pause (keep positions open)\n"
-                "/resume — Override a tripped circuit breaker (clears at midnight)\n"
+                "/resume_trading — Override a tripped circuit breaker (clears at midnight)\n"
                 "/reset_equity — Re-baseline equity to clear phantom drawdown\n"
                 "/close_all — Emergency close all positions\n"
                 "/close ASSET [#] — Close all or specific position for asset\n"
@@ -3064,6 +3086,192 @@ class TradingTelegramBot:
         except Exception as e:
             logger.error(f"[TG] /overrides error: {e}", exc_info=True)
             await update.message.reply_text("❌ Error fetching override info")
+
+    # ==================== B14 (20 Oct): new-rules visibility ====================
+    # The old B14/B15 wall-lock/staircase system had no Telegram command either, so
+    # none of this is replacing anything -- it's new visibility the rename to the
+    # R-ladder/springboard never had an equivalent for.
+
+    async def cmd_b14_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /b14_status — whether the new B14 rules are on, and the settings in
+        force. Read-only: never calls b14_rules.apply_settings() (that resets then
+        reapplies the live module globals the trading cycle reads mid-flight from a
+        different thread) -- only the pure read-only formatters and the pure validator."""
+        try:
+            from src.execution import b14_rules as B14
+            pc = self.trading_bot.config.get("phase_config", {}) or {}
+            msg = "🧮 <b>B14 RULES STATUS</b>\n\n"
+            msg += f"<code>{html.escape(B14.live_rules_text(pc))}</code>\n\n"
+            msg += f"<b>Settings in force:</b>\n<code>{html.escape(B14.settings_text())}</code>\n"
+            bad = []
+            for k, v in (pc.get("b14_tuning") or {}).items():
+                _val, why = B14.check_setting(k, v)
+                if why:
+                    bad.append((k, why))
+            if bad:
+                msg += "\n⚠️ <b>Refused in config (today's value kept):</b>\n"
+                for k, why in bad:
+                    msg += f"  • {html.escape(k)}: {html.escape(why)}\n"
+            msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            keyboard = [[InlineKeyboardButton("🔄 Refresh", callback_data="b14_status")]]
+            await update.message.reply_text(msg, parse_mode="HTML",
+                                            reply_markup=InlineKeyboardMarkup(keyboard))
+        except Exception as e:
+            logger.error(f"[TG] /b14_status error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching B14 status")
+
+    async def cmd_ladder(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /ladder [asset] — the B14 R-ladder state of open trades."""
+        try:
+            want = context.args[0].upper() if context.args else None
+            positions = list((self.trading_bot.portfolio_manager.positions or {}).values())
+            if want:
+                positions = [p for p in positions if str(getattr(p, "asset", "")).upper() == want]
+            msg = "🪜 <b>B14 LADDER</b>\n\n"
+            shown = 0
+            for pos in positions:
+                vtm = getattr(pos, "trade_manager", None)
+                if vtm is None or not getattr(vtm, "ns_b14n", False):
+                    continue
+                shown += 1
+                st = getattr(vtm, "ns_b14n_st", None) or {}
+                ladder = st.get("ladder") or getattr(vtm, "ns_b14n_ladder_def", None) or []
+                step = int(st.get("step", 0) or 0)
+                risk0 = float(st.get("risk0", 0) or 0)
+                best = st.get("best")
+                d = 1 if str(getattr(vtm, "side", "")).lower() == "long" else -1
+                best_r = (d * (best - vtm.entry_price) / risk0) if (best is not None and risk0) else None
+                emoji = "₿" if "BTC" in pos.asset.upper() else "🥇" if "GOLD" in pos.asset.upper() else "📈"
+                msg += f"{emoji} <b>{html.escape(pos.asset)}</b> ({html.escape(str(vtm.side).upper())})\n"
+                msg += f"  Entry {vtm.entry_price:.5g} | Stop {vtm.current_stop_loss:.5g}"
+                if best_r is not None:
+                    msg += f" | best +{best_r:.2f}R"
+                msg += "\n"
+                for i, rung in enumerate(ladder):
+                    trig, lock = rung[0], rung[1]
+                    mark = "✅" if i < step else ("👉" if i == step else "▫️")
+                    msg += f"  {mark} +{trig:g}R → stop +{lock:g}R\n"
+                msg += "\n"
+            if not shown:
+                msg += "<i>No open B14-ladder trades" + (f" for {html.escape(want)}" if want else "") + ".</i>\n"
+            msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[TG] /ladder error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching ladder status")
+
+    async def cmd_spring(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /spring [asset] — package entries currently waiting at a springboard
+        wall (main.py refreshes self.trading_bot._latest_pkg_watching once per cycle)."""
+        try:
+            want = context.args[0].upper() if context.args else None
+            watch = getattr(self.trading_bot, "_latest_pkg_watching", {}) or {}
+            state_text = {0: "waiting for the break", 1: "broken, waiting for the retest",
+                         2: "retested, waiting for the close-through"}
+            msg = "🌉 <b>SPRINGBOARD WATCH</b>\n\n"
+            shown = 0
+            for asset, recs in watch.items():
+                if want and asset.upper() != want:
+                    continue
+                for rec in recs:
+                    sp = rec.get("spring")
+                    if not sp:
+                        continue
+                    shown += 1
+                    d = rec.get("d")
+                    emoji = "₿" if "BTC" in asset.upper() else "🥇" if "GOLD" in asset.upper() else "📈"
+                    msg += f"{emoji} <b>{html.escape(asset)}</b> ({'BUY' if d == 1 else 'SELL'})\n"
+                    msg += (f"  Wall {sp.get('lv')} ({html.escape(str(sp.get('name') or '?'))}), "
+                           f"{sp.get('dist_r')}R ahead of the confirmation {sp.get('q0')}\n")
+                    msg += f"  State: {state_text.get(int(sp.get('state', 0) or 0), '?')}\n"
+                    if sp.get("t0"):
+                        msg += f"  Waiting since {html.escape(str(sp['t0'])[:16])} (up to 48h)\n"
+                    msg += "\n"
+            if not shown:
+                msg += "<i>No package entries currently waiting at a springboard" + (f" for {html.escape(want)}" if want else "") + ".</i>\n"
+            msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[TG] /spring error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching springboard status")
+
+    async def cmd_gaps(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /gaps — the bot's own missing-candle check (src/update/data_gaps.py),
+        on demand instead of only via the watchdog alarm."""
+        try:
+            import pandas as pd
+            from datetime import timezone as _tz
+            from src.update import data_gaps as G
+            now = datetime.now(_tz.utc).replace(tzinfo=None)
+            lines, holes, late = [], 0, 0
+            assets = self.trading_bot.config.get("assets", {}) or {}
+            for a, c in assets.items():
+                if not c.get("enabled", False):
+                    continue
+                sym = c.get("symbol", a)
+                if c.get("exchange", "binance") == "mt5":
+                    sym = c.get("mt5_symbol", sym)
+                for tf, h in (("1h", 1), ("4h", 4)):
+                    p = os.path.join("data", "raw", f"{sym}_{tf}.csv")
+                    if not os.path.exists(p):
+                        lines.append(f"⚠️ {a} {tf.upper()}: file not found")
+                        holes += 1
+                        continue
+                    ts = pd.to_datetime(pd.read_csv(p, usecols=[0]).iloc[:, 0], utc=True, errors="coerce").dropna().dt.tz_localize(None)
+                    recent = ts[ts >= pd.Timestamp(now) - pd.Timedelta(days=G.WINDOW_DAYS + 2)]
+                    times = [x.to_pydatetime() for x in (recent if len(recent) else ts.nlargest(1))]
+                    for g in G.find_gaps(times, a, G.group_of(a, c), h, now):
+                        lines.append(html.escape(G.report_line(a, tf.upper(), g)))
+                        holes += g["kind"] == "hole"
+                        late += g["kind"] == "late"
+            msg = "📉 <b>DATA GAP CHECK</b>\n\n"
+            if lines:
+                msg += "<code>" + "\n".join(lines[:30]) + "</code>\n"
+                if len(lines) > 30:
+                    msg += f"<i>…and {len(lines) - 30} more</i>\n"
+            else:
+                msg += "<i>No gaps or late candles — every enabled market's 1H/4H file is current.</i>\n"
+            msg += f"\n{holes} hole(s), {late} late.\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[TG] /gaps error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error running the data-gap check")
+
+    async def cmd_rl_suggestions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /rl_suggestions — the B14 learner's latest suggestions
+        (tools/b14_rl.py writes logs/rl/b14_rl_suggestions.jsonl; Desire decides,
+        tools/b14_rl_apply.py applies — nothing here changes anything)."""
+        try:
+            import json
+            path = os.path.join("logs", "rl", "b14_rl_suggestions.jsonl")
+            msg = "🧠 <b>B14 LEARNER SUGGESTIONS</b>\n\n"
+            rows = []
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rows.append(json.loads(line))
+                        except Exception:
+                            continue
+            if not rows:
+                msg += "<i>No suggestions yet — the learner runs every Saturday job.</i>\n"
+            for s in rows[-5:]:
+                msg += f"<b>{html.escape(str(s.get('id', '?')))}</b> ({html.escape(str(s.get('date', '?')))})\n"
+                msg += f"  {html.escape(str(s.get('lever', '?')))}: {s.get('from')} → {s.get('to')}\n"
+                ev = s.get("evidence") or {}
+                w1, w2 = ev.get("w1") or {}, ev.get("w2") or {}
+                if w1 or w2:
+                    msg += (f"  16mo: {w1.get('dR', '?')}R ({w1.get('n_var', '?')} trades) | "
+                           f"11mo: {w2.get('dR', '?')}R ({w2.get('n_var', '?')} trades)\n")
+                msg += f"  Status: {html.escape(str(s.get('status', '?')))}\n\n"
+            msg += f"\n🕐 {datetime.now().strftime('%H:%M:%S')}"
+            await update.message.reply_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"[TG] /rl_suggestions error: {e}", exc_info=True)
+            await update.message.reply_text("❌ Error fetching learner suggestions")
 
     # ==================== NOTIFICATION METHODS ====================
 

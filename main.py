@@ -602,6 +602,11 @@ class TradingBot:
         # reads this cache instead, accepting staleness up to one main-loop
         # cycle (~5 min). Values are CompositeState.to_dict() dicts, not objects.
         self._latest_composite_state: dict = {}
+        # B14 Telegram (20 Oct): the package's own watching records (st["pkg"] inside
+        # the engine's CompositeStateBuilder, incl. a waiting springboard's rec["spring"])
+        # are not part of CompositeState.to_dict() -- refreshed once per cycle alongside
+        # scanner_state.json so /spring can read it without touching the trading loop.
+        self._latest_pkg_watching: dict = {}
         # Brain Rebuild Part 3.4: sibling cache for the human-alert layer
         # (Part 3.5) — {"buy": {...judge scores...}, "sell": {...}} per asset.
         # Read from cache rather than re-invoking get_aggregated_signal from
@@ -5031,6 +5036,38 @@ class TradingBot:
                     )
             except Exception as _scane:
                 logger.warning(f"[SCANNER-DASH] State dump failed: {_scane}")
+
+            # B14 Telegram (20 Oct): cache each market's watching package records (a
+            # waiting springboard included) for /spring -- same per-cycle refresh
+            # cadence, and the same _cs_builder resolution main.py already uses
+            # elsewhere (e.g. the proof-burn site ~6641). Read-only: copies selected
+            # fields into fresh dicts, never touches the engine's own state.
+            try:
+                _pkg_watch = {}
+                for _pk_asset in _ns_mk_cfg:
+                    _pk_agg = (self.aggregators or {}).get(_pk_asset)
+                    _pk_cs_b = getattr(_pk_agg, "_cs_builder", None)
+                    if _pk_cs_b is None and isinstance(_pk_agg, dict):
+                        for _slot in ("council", "livermore", "performance"):
+                            _pk_cand = _pk_agg.get(_slot)
+                            _pk_cs_b = getattr(_pk_cand, "_cs_builder", None)
+                            if _pk_cs_b is not None:
+                                break
+                    _pk_st = (getattr(_pk_cs_b, "_ns_state", None) or {}).get(_pk_asset) if _pk_cs_b is not None else None
+                    _recs = []
+                    for _rec in (_pk_st or {}).get("pkg") or []:
+                        if _rec.get("status") != "watching":
+                            continue
+                        _recs.append({
+                            "d": _rec.get("d"), "r2": _rec.get("r2"), "tE": _rec.get("tE"),
+                            "eE": _rec.get("eE"), "route": _rec.get("route"), "rearm_n": _rec.get("rearm_n"),
+                            "spring": dict(_rec["spring"]) if _rec.get("spring") else None,
+                        })
+                    if _recs:
+                        _pkg_watch[_pk_asset] = _recs
+                self._latest_pkg_watching = _pkg_watch
+            except Exception as _pke:
+                logger.debug(f"[PKG-DASH] watching-records cache failed: {_pke}")
 
             # ✨ NEW: Update positions with OHLC data for VTM
             try:
