@@ -10996,7 +10996,8 @@ class TradingBot:
                     else "every %ss (old timer)" % check_interval)
             )
             logger.info("[MTF] Regime updates: every look, 5-min detector cache")   # B14 3.1: was "Every cycle (~300s)"
-            logger.info(f"Press Ctrl+C to stop\n")
+            logger.info("To stop the bot on purpose: tools\\stop_bot.ps1 (it writes logs\\stop.flag). A Ctrl+C or "
+                        "Ctrl+Break is logged and ignored (B14 Part 3A).\n")
 
             # B14 item 1.1b: package decisions reach Telegram the moment they are made (from any look)
             try:
@@ -11019,8 +11020,28 @@ class TradingBot:
             self.run_trading_cycle()
 
             _restart_flag = str(Path("logs") / "restart.flag")
+            _stop_flag = str(Path("logs") / "stop.flag")     # B14 Part 3A: a deliberate stop (tools\stop_bot.ps1)
             while self.is_running:
                 try:
+                    # ── B14 Part 3A: a second start that was refused is reported (log + Telegram) ──
+                    _b1a_report_refusals(self, "just now")
+                    # ── B14 Part 3A (Desire 20 Oct): a deliberate stop -- logs\stop.flag, checked every second ──
+                    # The whole stop() runs (state saved, "TBOT STOPPING" sent), then the loop ends and the bot exits
+                    # with code 0. tools\stop_bot.ps1 pauses the outside watchdog first, so it does not restart the bot.
+                    if os.path.exists(_stop_flag):
+                        _why_st1a = ""
+                        try:
+                            _why_st1a = Path(_stop_flag).read_text(encoding="utf-8", errors="replace").strip()[:200]
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(_stop_flag)
+                        except Exception as _rm_st1a:
+                            logger.warning("[CONTROL] logs\\stop.flag could not be deleted: %s (the next start removes it)", _rm_st1a)
+                        _why_st1a = _b1a_mask(_why_st1a) or "no note in the file"
+                        logger.info("[CONTROL] logs\\stop.flag found -- stopping the bot on purpose (%s)", _why_st1a)
+                        self.stop("deliberate stop, logs\\stop.flag (%s)" % _why_st1a)
+                        break
                     # ── Control Center restart hook ──────────────────────────
                     if os.path.exists(_restart_flag):
                         os.remove(_restart_flag)
@@ -11100,7 +11121,18 @@ class TradingBot:
                 logger.warning("[TELEGRAM] direct send skipped: no token / admin ids")
                 return
             for _cid in _ids:
-                _rq.post("https://api.telegram.org/bot%s/sendMessage" % _tok, json={"chat_id": _cid, "text": text}, timeout=8)
+                _r1a = _rq.post("https://api.telegram.org/bot%s/sendMessage" % _tok, json={"chat_id": _cid, "text": text}, timeout=8)
+                # B14 Part 3A: say whether Telegram took it -- a refused send used to look the same as a sent one. The
+                # refused line contains "[TELEGRAM] direct send failed", so the watchdog check b13.tg_direct_ok alarms on it.
+                if getattr(_r1a, "status_code", None) == 200:
+                    logger.info("[TELEGRAM] direct send ok: %s", str(text)[:60])
+                else:
+                    try:
+                        _d1a = str((_r1a.json() or {}).get("description", ""))[:120]
+                    except Exception:
+                        _d1a = ""
+                    logger.warning("[TELEGRAM] direct send failed: Telegram refused it (HTTP %s %s) -- message: %s",
+                                   getattr(_r1a, "status_code", "?"), _d1a, str(text)[:60])
         except Exception as _e:
             logger.warning(f"[TELEGRAM] direct send failed: {_e}")
 
@@ -11263,6 +11295,15 @@ class TradingBot:
         logger.info("=" * 70)
         logger.info("[OK] Trading bot stopped")
         logger.info("=" * 70)
+        # B14 Part 3A: a clean stop leaves no PID file behind (only its own -- another instance's is left alone). An old
+        # file could block the next start (main() refused whenever any program had that number).
+        try:
+            _pp1a = Path("logs") / "bot.pid"
+            if _pp1a.exists() and _pp1a.read_text().strip() == str(os.getpid()):
+                _pp1a.unlink()
+                logger.info("[STOP] logs\\bot.pid removed")
+        except Exception as _pe1a:
+            logger.warning("[STOP] logs\\bot.pid not removed: %s", _pe1a)
 
 
 import requests
@@ -11292,6 +11333,9 @@ def start_dashboard_server():
             stderr=None,   # Inherit parent stderr
             cwd=str(project_root),  # ← project root so .env + imports work
             start_new_session=True if sys.platform != "win32" else False,
+            # B14 Part 3A: its own process group on Windows -- Windows then switches Ctrl+C off for it, so a Ctrl+C on the
+            # bot's console can't stop the dashboard either. Its output still goes where it went (the launcher log).
+            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if sys.platform == "win32" else 0),
         )
 
         # Give server time to start
@@ -11414,8 +11458,308 @@ def start_dashboard_server_threaded():
         return None
 
 
+# ── B14 Part 3A (Desire 20 Oct 2026, D1 A): keep the bot on ──────────────────────────────────────────────────────────
+# Six stops since 5 Oct came from a Ctrl+C reaching the bot's console (hidden, but still a console): Python raised
+# KeyboardInterrupt and the bot shut down. On 19 Oct the PowerShell launcher (run_bot.ps1) also killed python half-way
+# through that shutdown -- PowerShell stops a running script on Ctrl+C and kills a program whose output it is passing
+# along (the "| Tee-Object" in run_bot.ps1) -- so "TBOT STOPPING" never went out. Now:
+#   - run_bot.ps1 v2 ignores Ctrl+C and Ctrl+Break, and passes "ignore Ctrl+C" on to the programs it starts;
+#   - the bot puts its own handler on Ctrl+C and Ctrl+Break, then switches Ctrl+C back on for itself only. Each one is
+#     logged ([B1A] ...) with the programs on the bot's console at that moment (to find where they come from), at most
+#     one Telegram goes out every 10 minutes, and the bot keeps running;
+#   - the handler itself only takes a quick Windows snapshot and puts it in a queue (no log line, no lock): it runs in
+#     the main thread between two steps of whatever that thread was doing -- maybe half-way through writing a log
+#     line, and one of the log handlers (the watchdog's tail) can't be entered twice, so a log call there would wait
+#     forever. The B1A thread writes the log line and sends the Telegram (B14 Part 3 review, 20 Oct);
+#   - a deliberate stop goes through logs\stop.flag (tools\stop_bot.ps1), which the main loop checks every second.
+_B1A = {"bot": None, "n": 0, "held": 0, "last_tg": 0.0, "pending": [], "installed": "not installed", "pid_note": "", "t_start": 0.0,
+        "lock": threading.RLock(), "q": None, "fn": None}
+
+
+def _b1a_mask(text):
+    """Hide anything secret-looking (a bot token, password=..., key=...) and long numbers (an account number)."""
+    import re as _re1a
+    s = str(text)
+    s = _re1a.sub(r"\d{8,10}:[A-Za-z0-9_-]{35}", "<hidden>", s)
+    s = _re1a.sub(r"(?i)(token|password|passwd|secret|api_?key)(\S*?[=:]\s*)\S+", r"\1\2<hidden>", s)
+    return _re1a.sub(r"\b\d{7,}\b", "<n>", s)
+
+
+def _b1a_win_fns():
+    """The Windows calls the Ctrl+C handler needs, looked up once at start-up, so the handler only calls them."""
+    import ctypes
+    from ctypes import wintypes
+    _k, _u = ctypes.windll.kernel32, ctypes.windll.user32
+    _k.GetConsoleProcessList.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32]
+    _k.GetConsoleProcessList.restype = ctypes.c_uint32
+    _k.GetConsoleWindow.restype = wintypes.HWND
+    _u.IsWindowVisible.argtypes = [wintypes.HWND]
+    _u.GetForegroundWindow.restype = wintypes.HWND
+    _u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    return {"k": _k, "u": _u, "arr": ctypes.c_uint32 * 256, "dword": wintypes.DWORD, "byref": ctypes.byref}
+
+
+def _b1a_snapshot():
+    """Runs inside the Ctrl+C handler: Windows calls only -- no log line, no lock, no psutil. Returns the PIDs on the
+    bot's console (or a reason), the PID that owns the window in front (0 = no desktop; never the window's title:
+    MT5's title holds the account number), and whether the bot's own console window is showing."""
+    fn = _B1A["fn"]
+    if fn is None:
+        return "n/a (not Windows)", None, "n/a"
+    try:
+        arr = fn["arr"]()
+        n = int(fn["k"].GetConsoleProcessList(arr, 256))
+        pids = [int(x) for x in arr[:n]] if 0 < n <= 256 else ("unknown (%d programs)" % n if n else "unknown (no list)")
+    except Exception as e:
+        pids = "unknown (%s)" % e
+    try:
+        h = fn["u"].GetForegroundWindow()
+        front = 0
+        if h:
+            d = fn["dword"]()
+            fn["u"].GetWindowThreadProcessId(h, fn["byref"](d))
+            front = int(d.value)
+    except Exception as e:
+        front = "unknown (%s)" % e
+    try:
+        hw = fn["k"].GetConsoleWindow()
+        own = "none" if not hw else ("VISIBLE" if fn["u"].IsWindowVisible(hw) else "hidden")
+    except Exception as e:
+        own = "unknown (%s)" % e
+    return pids, front, own
+
+
+def _b1a_names(pids):
+    """'PID name [command line]; ...' for the PIDs the handler saw -- looked up a moment later, in the B1A thread."""
+    if not isinstance(pids, list):
+        return str(pids)
+    try:
+        import psutil as _ps1a
+    except ImportError:
+        _ps1a = None
+    out = []
+    for p in pids:
+        label = "?"
+        if _ps1a is not None:
+            try:
+                pr = _ps1a.Process(p)
+                label = pr.name()
+                try:
+                    cl = " ".join(pr.cmdline())
+                    if cl:
+                        label += " [%s]" % _b1a_mask(cl)[:110]
+                except Exception:
+                    pass
+            except Exception:
+                label = "(already gone)"
+        out.append("%d %s" % (p, label))
+    return "; ".join(out)
+
+
+def _b1a_front_label(front):
+    """The window in front as 'name (PID n)' -- its program's name and PID only, never the window's title."""
+    if front is None:
+        return "n/a"
+    if isinstance(front, str):
+        return front
+    if front == 0:
+        return "none (no desktop in front -- e.g. the remote session is disconnected)"
+    name = "?"
+    try:
+        import psutil as _ps1a
+        name = _ps1a.Process(front).name()
+    except Exception:
+        pass
+    return "%s (PID %d)" % (name, front)
+
+
+def _b1a_alert(text):
+    """At most one Telegram every 10 minutes; the ones in between are counted into the next message (every one is in
+    the log). Before the bot object exists, the message waits and goes out as soon as it does."""
+    try:
+        with _B1A["lock"]:
+            now = time.time()
+            if now - _B1A["last_tg"] < 600:
+                _B1A["held"] += 1
+                return
+            if _B1A["held"]:
+                text += " (%d more since the last message -- each one is in the log)" % _B1A["held"]
+            _B1A["held"], _B1A["last_tg"] = 0, now
+            bot = _B1A["bot"]
+            if bot is None:
+                _B1A["pending"].append(text)
+                return
+        bot._b13_tg_direct(text)
+    except Exception as e:
+        try:
+            logger.warning("[B1A] Telegram not sent: %s", e)
+        except Exception:
+            pass
+
+
+def _b1a_on_ctrl(signum, frame):
+    """Python runs this in the main thread when a Ctrl+C (SIGINT) or a Ctrl+Break (SIGBREAK) reaches the bot --
+    between two steps of whatever the main thread was doing, maybe half-way through writing a log line. So it only
+    takes the Windows snapshot and puts it in a queue that is safe to use here (queue.SimpleQueue); no log line, no
+    lock. The B1A thread logs it and sends the Telegram. Returning = no KeyboardInterrupt: the bot keeps running."""
+    try:
+        q = _B1A["q"]
+        if q is not None:
+            pids, front, own = _b1a_snapshot()          # first: whoever sent it may still be on the console
+            q.put((signum, time.time(), pids, front, own))
+    except Exception:
+        pass
+
+
+def _b1a_worker():
+    """The B1A thread: one log line per Ctrl+C / Ctrl+Break the handler noted, and the (limited) Telegram."""
+    while True:
+        try:
+            signum, t, pids, front, own = _B1A["q"].get()
+        except Exception:
+            time.sleep(1)
+            continue
+        try:
+            # Windows' C runtime raises the same signal (SIGBREAK) for a Ctrl+Break and for a console close, sign-out
+            # or shutdown, so the bot can't tell those apart
+            what = "Ctrl+C" if signum == signal.SIGINT else "Ctrl+Break (or a console close / sign-out / shutdown signal)"
+            programs = _b1a_names(pids)
+            front_l = _b1a_front_label(front)
+            with _B1A["lock"]:
+                _B1A["n"] += 1
+                n = _B1A["n"]
+            when = datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")
+            logger.warning("[B1A] a %s reached the bot at %s (%d since the start) -- IGNORED, the bot keeps running | "
+                           "programs on its console: %s | window in front: %s | the bot's console window: %s",
+                           what, when, n, programs, front_l, own)
+            # the Telegram from its own short thread, so a slow send never holds up the next event's log line
+            threading.Thread(target=_b1a_alert, daemon=True, name="B1A-alert", args=(
+                "TBOT: a %s reached the bot at %s box time and was IGNORED -- the bot keeps running (%d since the "
+                "start). Programs on its console: %s. Window in front: %s." % (what, when, n, programs, front_l),)).start()
+        except Exception:
+            pass
+
+
+def _b1a_install():
+    """First thing in main() (the main thread): the B1A thread, the handlers, then Ctrl+C switched back on for this
+    process only. run_bot.ps1 v2 switches Ctrl+C off for itself and the programs it starts (Windows passes that on),
+    so PowerShell can never stop the bot. If the Ctrl+C handler can't be set, Ctrl+C is left as the launcher set it."""
+    try:
+        import psutil as _ps1a
+        _B1A["t_start"] = float(_ps1a.Process().create_time())   # when this python started -- before main.py's imports
+    except Exception:
+        _B1A["t_start"] = time.time()
+    parts, ok_int = [], False
+    try:
+        import queue as _qu1a
+        _B1A["q"] = _qu1a.SimpleQueue()
+        threading.Thread(target=_b1a_worker, daemon=True, name="B1A").start()
+    except Exception as e:
+        _B1A["q"] = None
+        parts.append("the B1A thread NOT started (%s) -- a Ctrl+C is still ignored, but not logged" % e)
+    if os.name == "nt":
+        try:
+            _B1A["fn"] = _b1a_win_fns()
+        except Exception as e:
+            parts.append("Windows calls not set up (%s) -- no console list" % e)
+    try:
+        signal.signal(signal.SIGINT, _b1a_on_ctrl)
+        parts.append("Ctrl+C handler set")
+        ok_int = True
+    except Exception as e:
+        parts.append("Ctrl+C handler NOT set (%s)" % e)
+    if hasattr(signal, "SIGBREAK"):
+        try:
+            signal.signal(signal.SIGBREAK, _b1a_on_ctrl)
+            parts.append("Ctrl+Break handler set")
+        except Exception as e:
+            parts.append("Ctrl+Break handler NOT set (%s)" % e)
+    if os.name == "nt":
+        if ok_int:
+            try:
+                import ctypes
+                if ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False):
+                    parts.append("a Ctrl+C reaches the bot's handler")
+                else:
+                    parts.append("Ctrl+C could not be switched back on -- it stays ignored, without a log line")
+            except Exception as e:
+                parts.append("Ctrl+C switch-on failed (%s)" % e)
+        else:
+            parts.append("Ctrl+C left as the launcher set it")
+    _B1A["installed"] = "; ".join(parts)
+
+
+def _b1a_pid_is_bot(pid):
+    """Is this PID a running TBOT? (True, why) for a running python whose command line runs main.py and that is
+    neither this process nor its parent (the venv's python.exe starts the real python as its child); (False, why)
+    when it isn't; (None, why) when it can't be checked (psutil missing). A program this user may not read is not a
+    TBOT (the bot runs as this same user); any other read error counts as a running bot, to be safe."""
+    try:
+        import psutil as _ps1a
+    except ImportError:
+        return None, "psutil not installed"
+    pid = int(pid)
+    try:
+        _parent = os.getppid()
+    except Exception:
+        _parent = None
+    if pid in (os.getpid(), _parent):
+        return False, "PID %d is this start itself" % pid
+    try:
+        pr = _ps1a.Process(pid)
+        name = (pr.name() or "").lower()
+    except _ps1a.NoSuchProcess:
+        return False, "no program has PID %d now" % pid
+    except _ps1a.AccessDenied:
+        # the bot always runs as this same user, so a program this user may not read is not a TBOT
+        return False, "PID %d belongs to a program this user may not read -- not a TBOT" % pid
+    except Exception as e:
+        return True, "PID %d exists but could not be read (%s) -- counted as a running bot, to be safe" % (pid, e)
+    if not name.startswith("python"):
+        return False, "PID %d is now %s, not python" % (pid, name)
+    try:
+        cl = " ".join(pr.cmdline())
+    except _ps1a.AccessDenied:
+        return False, "PID %d is a python this user may not read -- not a TBOT" % pid
+    except Exception as e:
+        return True, "PID %d is python but its command line could not be read (%s) -- counted as a running bot" % (pid, e)
+    if "main.py" not in cl:
+        return False, "PID %d is python running something else" % pid
+    return True, "PID %d is python running main.py" % pid
+
+
+def _b1a_note_refusal(why):
+    """A refused start writes one line to logs\\startup_refused.txt; the running bot (or else the next start) reports
+    it in the log and on Telegram."""
+    try:
+        Path("logs").mkdir(exist_ok=True)
+        with open(Path("logs") / "startup_refused.txt", "a", encoding="utf-8") as _f1a:
+            _f1a.write("%s | PID %d | %s\n" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), os.getpid(), _b1a_mask(why)))
+    except Exception:
+        pass
+
+
+def _b1a_report_refusals(bot, when_text):
+    """Reports and removes logs\\startup_refused.txt, if there is one (at start-up, and every second in the main loop)."""
+    p = Path("logs") / "startup_refused.txt"
+    if not p.exists():
+        return
+    try:
+        lines = [x.strip() for x in p.read_text(encoding="utf-8", errors="replace").splitlines() if x.strip()]
+        p.unlink()
+    except Exception as e:
+        logger.warning("[STARTUP] logs\\startup_refused.txt could not be read: %s", e)
+        return
+    for ln in lines[-5:]:
+        logger.warning("[STARTUP] a second start of TBOT was REFUSED (a TBOT was running): %s", ln)
+    if lines and bot is not None:
+        bot._b13_tg_direct("TBOT: %d start(s) of a second TBOT were refused %s -- the running bot is not affected. "
+                           "Newest: %s" % (len(lines), when_text, lines[-1]))
+
+
 def main():
     """Main entry point"""
+    _b1a_install()          # B14 Part 3A: first -- a Ctrl+C from here on is logged and ignored
     Path("models").mkdir(exist_ok=True)
     Path("data").mkdir(exist_ok=True)
     Path("logs").mkdir(exist_ok=True)
@@ -11431,14 +11775,18 @@ def main():
         except (ValueError, OSError):
             _old_pid = None
         if _old_pid is not None:
-            try:
-                import psutil
-                _still_running = psutil.pid_exists(_old_pid)
-            except ImportError:
-                _still_running = None
+            # B14 Part 3A: refuse only when that PID really is a running TBOT. The old check refused whenever ANY
+            # program had that number: after a restart Windows can give the dead bot's number to another program, and
+            # the bot then refused every start until the file was deleted by hand.
+            _still_running, _why_pid1a = _b1a_pid_is_bot(_old_pid)
             if _still_running:
-                print(f"[STARTUP] Another instance (PID {_old_pid}) is already running. Exiting.")
+                print(f"[STARTUP] Another instance (PID {_old_pid}) is already running ({_why_pid1a}). Exiting.")
+                _b1a_note_refusal("logs\\bot.pid: " + _why_pid1a)
                 sys.exit(1)
+            elif _still_running is False:
+                _B1A["pid_note"] = "logs\\bot.pid named PID %d, which is not a running TBOT (%s) -- an old file, ignored" % (
+                    _old_pid, _why_pid1a)
+                print("[STARTUP] " + _B1A["pid_note"])
             elif _still_running is None:
                 logger.warning(
                     f"[STARTUP] Could not verify whether PID {_old_pid} from {_pid_path} is "
@@ -11511,6 +11859,48 @@ def main():
     bot = None
     try:
         bot = TradingBot(_config_path)
+        # B14 Part 3A: the logging is set up now -- say how the Ctrl+C guard stands, send any alert that waited, and
+        # clear an old stop.flag (a start overrides an earlier stop) and report old refused-start notes
+        logger.info("[B1A] Ctrl+C guard: %s", _B1A["installed"])
+        # B14 Part 3 review: a guard that is not fully on at a later start (a Windows update, a blocked Add-Type ...)
+        # must not stay silent. run_bot.ps1 v2 passes its own result in TBOT_CTRL_GUARD.
+        _lg1a = _b1a_mask(os.environ.get("TBOT_CTRL_GUARD", "")) or None
+        _in1a = _B1A["installed"]
+        _bot_ok1a = not any(w in _in1a for w in ("NOT", "could not", "failed", "not set up")) and (os.name != "nt" or all(
+            x in _in1a for x in ("Ctrl+C handler set", "Ctrl+Break handler set", "a Ctrl+C reaches the bot's handler")))
+        _guard_msg1a = ""
+        if not _bot_ok1a or (_lg1a is not None and not ("Ctrl+C ignored = True" in _lg1a and "Ctrl+Break caught = True" in _lg1a)):
+            _guard_msg1a = "the Ctrl+C guard is NOT fully on at this start -- the bot: %s | the launcher: %s" % (
+                _in1a, _lg1a or "no report (not started by run_bot.ps1 v2)")
+            logger.error("[B1A] %s", _guard_msg1a)
+        elif _lg1a is None:
+            logger.warning("[B1A] this start did not come through run_bot.ps1 v2 (TBOT_CTRL_GUARD is not set) -- the "
+                           "launcher's own Ctrl+C protection is unknown")
+        else:
+            logger.info("[B1A] the launcher: %s", _lg1a)
+        if _B1A["pid_note"]:
+            logger.info("[STARTUP] %s", _B1A["pid_note"])
+        with _B1A["lock"]:
+            _B1A["bot"] = bot
+            _waiting1a, _B1A["pending"] = list(_B1A["pending"]), []
+        for _t1a in _waiting1a:
+            bot._b13_tg_direct(_t1a)
+        if _guard_msg1a:
+            bot._b13_tg_direct("TBOT: " + _guard_msg1a + ". A Ctrl+C could stop the bot half-way again -- tell Desire.")
+        _sf1a = Path("logs") / "stop.flag"
+        if _sf1a.exists() and _sf1a.stat().st_mtime >= _B1A["t_start"] - 1:
+            # written while this start was under way (tools\stop_bot.ps1 during start-up): a real stop -- left for the loop
+            logger.warning("[CONTROL] logs\\stop.flag was written during this start-up -- the bot stops at its first loop")
+        elif _sf1a.exists():
+            try:
+                _old1a = _b1a_mask(_sf1a.read_text(encoding="utf-8", errors="replace").strip()[:200])
+                _sf1a.unlink()
+                logger.warning("[CONTROL] an old logs\\stop.flag was found at start-up (%s) and removed -- a start "
+                               "overrides an earlier stop", _old1a or "no note")
+            except Exception as _sfe1a:
+                logger.error("[CONTROL] an old logs\\stop.flag could not be removed (%s) -- the bot will stop at its "
+                             "first loop; delete the file and start it again", _sfe1a)
+        _b1a_report_refusals(bot, "while no TBOT was running")
         # B4 W5: fires on ANY normal interpreter shutdown -- the backstop for
         # a path that never reaches TradingBot.stop() (e.g. an exception
         # during bot.start() before its own try block is entered). Harmless
