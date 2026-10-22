@@ -384,8 +384,10 @@ def get_stats():
             .execute()
         )
 
-        # Get performance stats
-        trades = supabase.table("trades").select("*").eq("status", "closed").execute()
+        # Get performance stats (only strategy/pnl are read below -- select("*")
+        # was pulling every column of every closed trade, unbounded, on every
+        # 30s dashboard poll; this is the dominant Supabase egress cost)
+        trades = supabase.table("trades").select("strategy, pnl").eq("status", "closed").execute()
 
         # Calculate strategy stats
         strategy_stats = {}
@@ -656,10 +658,11 @@ def get_performance():
         days = request.args.get("days", 7, type=int)
         start_date = datetime.now() - timedelta(days=days)
 
-        # Get trades in date range
+        # Get trades in date range (only "pnl" is read below -- same
+        # select("*") egress issue as /api/stats above)
         trades = (
             supabase.table("trades")
-            .select("*")
+            .select("pnl")
             .eq("status", "closed")
             .gte("exit_time", start_date.isoformat())
             .execute()
