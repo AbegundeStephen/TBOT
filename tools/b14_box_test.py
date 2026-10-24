@@ -1,6 +1,7 @@
 """B14 BOX TEST (Desire 15-16 Oct 2026) -- READ-ONLY. Run with the bot running or stopped: it reads the price files,
-the config, the logs (the spreads the bot paid) and MT5's own 30-minute / daily / weekly candles (read-only, or the
-export files of tools\\b15_export.py when MT5 is not reachable); it never sends an order and changes no file of the bot.
+the config, MT5's spreads at the bot's look times (its own ticks) and MT5's own 30-minute / daily / weekly candles
+(read-only, or the export files of tools\\b15_export.py when MT5 is not reachable); it never sends an order and changes
+no file of the bot.
 It writes only its report logs\\b14_box_test_<stamp>.txt (+ .pkl with every booked trade).
 
   python tools\\b14_box_test.py                      -- 27 months: the last 16 months AND the 11 months before them
@@ -17,7 +18,13 @@ It runs the bot's own files (ns_engine, ns_package, line_map, b14_rules), so it 
      setup is put back and replayed from its cancel;
   4. trades are booked one position per market at a time and run on the 30-minute candles: stop, target, the 7-day
      exit (168 closed 1H candles), BTC's runner on the B13 rows, the R-ladder on the new-B14 rows. Money = the
-     smallest lot, minus the spread the bot really paid.
+     smallest lot, minus the spread at the bot's look times (B14 Part 4: the median of MT5's own ticks at :00:30 and
+     :30:30 UTC over the last 14 days; the old "[FRICTION] used=" figure was the council's fixed table, not a spread
+     paid, and it is written only when the council convenes).
+     B14 Part 4 (R-5): the 30-minute candles are asked for by date from the replay's first hour (they were the last
+     30,000, about 20.5 months of BTC, and older entries were then run on later candles without a word). If MT5 has
+     none that far back, the time before its first one is made from the hourly file (APPROXIMATE) and every report
+     line says so.
 
 What it prints:
   FIRST CHECK  the new code with the B14 switch OFF against the frozen engine and package the box ran on 15 Oct
@@ -65,6 +72,7 @@ OUT = []
 STAMP = time.strftime("%Y-%m-%d_%H%M")
 QUIET = {"on": False}
 LOG_N = collections.Counter()        # the engine's and the package's own lines, counted per row while they run
+NO_M30 = collections.Counter()       # B14 Part 4 (R-5): entries left out because no 30-minute candle reaches back to them
 
 
 def say(s=""):
@@ -142,9 +150,11 @@ def _export_frames(sym):
     return out
 
 
-def mt5_frames(sym):
-    """30-minute, daily and weekly candles straight from MT5 (count-based: no local-time conversion); without MT5,
-    the export files if they are there."""
+def mt5_frames(sym, since=None):
+    """30-minute, daily and weekly candles straight from MT5; without MT5, the export files if they are there.
+    B14 Part 4 (R-5): with `since` (the replay's first hour, UTC) the 30-minute candles are asked for BY DATE, from a
+    day before it to now (in plain UTC seconds, so no local-time conversion); the daily and weekly ones stay
+    count-based (2500 and 700 candles, years more than any replay). Without `since`: the last 30,000, as before."""
     out = {}
     try:
         import MetaTrader5 as mt5
@@ -153,7 +163,16 @@ def mt5_frames(sym):
         mt5.symbol_select(sym, True)
         for name, tf, n in (("M30", mt5.TIMEFRAME_M30, 30000), ("D1", mt5.TIMEFRAME_D1, 2500),
                             ("W1", mt5.TIMEFRAME_W1, 700)):
-            r = mt5.copy_rates_from_pos(sym, tf, 0, n)
+            r = None
+            if name == "M30" and since is not None:
+                t0 = int((pd.Timestamp(since) - pd.Timestamp("1970-01-01")) // pd.Timedelta(seconds=1)) - 86400
+                r = mt5.copy_rates_range(sym, tf, t0, int(time.time()) + 86400)
+                if r is None or len(r) == 0:
+                    out["_m30_note"] = "MT5 gave no 30-minute candles by date (%s), so the last 30,000 were used" % (
+                        mt5.last_error(),)
+                    r = None
+            if r is None:
+                r = mt5.copy_rates_from_pos(sym, tf, 0, n)
             if r is None or len(r) == 0:
                 continue
             f = pd.DataFrame(r)
@@ -213,8 +232,56 @@ def lot_values():
     return out, spreads
 
 
+LOOK_LIMIT_S = 600      # B14 Part 4 (review): look_spreads stops after this many seconds
+LOOK_CUT = []           # ... and names here the markets it didn't finish
+
+
+def look_spreads(days=14, limit_s=None):
+    """B14 Part 4 (item 13): the spread at the moments the bot looks -- :00:30 and :30:30 UTC, the look right after each
+    half-hour close -- over the last `days` days, from MT5's own ticks (the first tick at or after each moment, kept
+    only if it came within 60 seconds: a closed market gives none). The median per market and how many readings it is.
+    It stops at LOOK_LIMIT_S seconds (a first run on a terminal that must fetch 14 days of ticks may be slow): a market
+    it didn't finish keeps what it read and is named in LOOK_CUT; its line in prepare() says where its spread came from.
+    -> {asset: (fraction of price, n)}; {} when MT5 is not reachable."""
+    out = {}
+    del LOOK_CUT[:]
+    t_stop = time.time() + float(LOOK_LIMIT_S if limit_s is None else limit_s)
+    try:
+        import MetaTrader5 as mt5
+        if not mt5.initialize():
+            return out
+        now = int(time.time())
+        start = now - int(days) * 86400
+        start -= start % 1800
+        looks = list(range(start + 30, now - 60, 1800))
+        for a, sym in MARKETS.items():
+            if time.time() > t_stop:
+                LOOK_CUT.append(a)
+                continue
+            mt5.symbol_select(sym, True)
+            v = []
+            for t in looks:
+                if time.time() > t_stop:
+                    LOOK_CUT.append(a)
+                    break
+                tk = mt5.copy_ticks_from(sym, t, 1, mt5.COPY_TICKS_INFO)
+                if tk is None or len(tk) == 0:
+                    continue
+                b, k = float(tk["bid"][0]), float(tk["ask"][0])
+                if int(tk["time"][0]) - t > 60 or b <= 0 or k <= b:
+                    continue
+                v.append((k - b) / ((k + b) / 2.0))
+            if v:
+                out[a] = (float(np.median(v)), len(v))
+    except Exception:
+        return out
+    return out
+
+
 def log_spreads():
-    """The spreads the bot really paid ([FRICTION] ... used=), median per market, from the newest logs."""
+    """NOT USED since B14 Part 4 (kept for reference): the '[FRICTION] <asset>: used=' figures. That figure is the
+    council's fixed friction table (FRICTION_PENALTIES; 0.0 for a market missing from it), not a spread the bot paid,
+    and the line is written only when the council convenes -- which is why the box test found none."""
     fr = collections.defaultdict(list)
     rx = re.compile(r"\[FRICTION\] (\w+)\b.*?used=([0-9.]+)")
     for f in sorted(glob.glob(os.path.join("logs", "trading_bot.log*")), key=os.path.getmtime)[-5:]:
@@ -314,6 +381,8 @@ def simulate(e, m30, cost, usd, exits_on, h1=None, ladder=None):
     q, stop, tgt = float(f["ns_close"]), float(f["ns_stop"]), f.get("ns_target")
     tgt = None if tgt in (None, "None") else float(tgt)
     t_in = pd.Timestamp(f["ns_candle"])
+    if not len(m30) or t_in < m30.index[0] - pd.Timedelta(minutes=30):
+        return None                       # B14 Part 4 (R-5): no candles at the entry -- never run it on later ones
     k0 = int(np.searchsorted(m30.index.values, np.datetime64(t_in), side="left"))
     if k0 >= len(m30):
         return None
@@ -371,13 +440,18 @@ def simulate(e, m30, cost, usd, exits_on, h1=None, ladder=None):
 def book(entries, D, exits_on, ladder=None):
     """One position per market at a time, in time order (the live bot never adds to an open trade)."""
     rows, free = [], pd.Timestamp("1900-01-01")
+    m30, real_from = D["m30"], D.get("m30_real_from")
     for e in sorted(entries, key=lambda x: pd.Timestamp(x["proof"]["fields"]["ns_candle"])):
         t_in = pd.Timestamp(e["proof"]["fields"]["ns_candle"])
         if t_in < free:
             continue
-        r = simulate(e, D["m30"], D["cost"], D["usd"], exits_on, h1=D["df"], ladder=ladder)
+        if not len(m30) or t_in < m30.index[0] - pd.Timedelta(minutes=30):
+            NO_M30[D.get("asset", "?")] += 1           # B14 Part 4 (R-5): counted and reported, never run on later candles
+            continue
+        r = simulate(e, m30, D["cost"], D["usd"], exits_on, h1=D["df"], ladder=ladder)
         if r is None:
             continue
+        r["approx30"] = real_from is not None and t_in < real_from
         rows.append(r)
         free = r["t_out"]
     return rows
@@ -457,7 +531,15 @@ def prepare(months=27.0, markets="all"):
     pc0 = dict(cfg.get("phase_config", {}) or {})
     names = list(MARKETS) if markets == "all" else [m.strip().upper() for m in str(markets).split(",")]
     usd, spreads = lot_values()
-    paid = log_spreads()
+    t_sp = time.time()
+    looks = look_spreads()
+    cut = ("; stopped at its %d-second limit, so %s got fewer or no look-time readings" % (LOOK_LIMIT_S, ", ".join(LOOK_CUT))
+           if LOOK_CUT else "")
+    say("spreads: %s" % ("the median at the bot's look times (:00:30 and :30:30 UTC) over the last 14 days, from MT5's "
+                         "ticks (%.0f s%s)" % (time.time() - t_sp, cut) if looks else
+                         ("MT5's ticks were too slow (stopped at the %d-second limit before any reading)" % LOOK_LIMIT_S
+                          if LOOK_CUT else "MT5's ticks were not reachable") +
+                         " -- each market's line says where its spread came from"))
     try:
         from src.execution.shadow_trader import FRICTION_PENALTIES as _FP, _DEFAULT_FRICTION as _DF
     except Exception:
@@ -491,19 +573,46 @@ def prepare(months=27.0, markets="all"):
     data = {}
     for a, (df, note) in raw.items():
         df = df[df.index >= t_start]
-        fr = mt5_frames(MARKETS[a])
+        fr = mt5_frames(MARKETS[a], since=df.index[0])
         approx = "M30" not in fr
-        m30 = fr.get("M30") if not approx else m30_from_1h(df)
-        m30 = m30[m30.index >= df.index[0]]
+        if approx:
+            m30, real_from = m30_from_1h(df), pd.Timestamp.max
+            how30 = "APPROXIMATE (made from the hourly file)"
+        else:
+            m30 = fr["M30"]
+            m30 = m30[m30.index >= df.index[0]]
+            src30 = "MT5" if fr.get("_src") != "export" else "the export files"
+            if len(m30) and m30.index[0] > df.index[0] + pd.Timedelta(days=3):
+                # B14 Part 4 (R-5): no real 30-minute candles that far back -- the time before the first one is made from
+                # the hourly file, and the trades that start in it are counted as approximate in every report
+                real_from = m30.index[0]
+                m30 = pd.concat([m30_from_1h(df[df.index < real_from]), m30]).sort_index()
+                m30 = m30[~m30.index.duplicated(keep="last")]
+                how30 = "%s from %s, APPROXIMATE before that (made from the hourly file)" % (src30, str(real_from)[:10])
+            else:
+                real_from = None
+                how30 = "%s from %s" % (src30, str(m30.index[0])[:10] if len(m30) else "-")
+        if fr.get("_m30_note"):
+            how30 += " (%s)" % fr["_m30_note"]
         d1, w1 = fr.get("D1"), fr.get("W1")
         mp = LM.MarketMap(a, df, d1, w1)
         frames = {"M30": m30, "D1": d1 if d1 is not None else mp.d1, "W1": w1 if w1 is not None else mp.w1}
-        cost = paid.get(a, spreads.get(a, _FP.get(a, _DF)))
-        data[a] = dict(df=df, m30=m30, mp=mp, frames=frames, cost=cost, usd=usd[a], approx=approx)
-        say("%-7s %s | 30m: %s | map: %d 4H candles, %d daily, %d weekly | spread %.5f%% | $%.4g per 1.0 at the smallest lot" % (
-            a, note, ("MT5" if fr.get("_src") != "export" else "the export files") if not approx else
-            "APPROXIMATE (made from the hourly file)", mp.n, len(mp.d1) if mp.d1 is not None else 0,
-            len(mp.w1) if mp.w1 is not None else 0, 100 * cost, usd[a]))
+        lk = looks.get(a)
+        if lk and lk[1] >= 20:
+            cost, how_sp = lk[0], "the looks' median, %d readings" % lk[1]
+        elif a in spreads:
+            cost, how_sp = spreads[a], "ONE reading (MT5 now%s)" % (
+                ": the look-time reading stopped at its time limit" if a in LOOK_CUT else
+                ": too few look-time ticks" if looks else "")
+        elif a in _FP:
+            cost, how_sp = _FP[a], "the council's fixed table (no MT5 reading)"
+        else:
+            cost, how_sp = _DF, "the default (no MT5 reading)"
+        data[a] = dict(df=df, m30=m30, mp=mp, frames=frames, cost=cost, usd=usd[a], approx=approx, asset=a,
+                       m30_real_from=real_from)
+        say("%-7s %s | 30m: %s | map: %d 4H candles, %d daily, %d weekly | spread %.5f%% (%s) | $%.4g per 1.0 at the "
+            "smallest lot" % (a, note, how30, mp.n, len(mp.d1) if mp.d1 is not None else 0,
+                              len(mp.w1) if mp.w1 is not None else 0, 100 * cost, how_sp, usd[a]))
     return dict(data=data, windows=windows, pc0=pc0, t_end=t_end)
 
 
@@ -636,9 +745,11 @@ def main():
         for a in data:
             s0 = stats([x for x in W["S0"] if x["asset"] == a])
             s1 = stats([x for x in W["B14"] if x["asset"] == a])
-            say("      %-7s %3d trades %+7.1fR $%+6.0f  ->  %3d trades %+7.1fR $%+6.0f%s" % (
+            n_ap = sum(1 for rid in rows for x in W[rid] if x["asset"] == a and x.get("approx30"))
+            say("      %-7s %3d trades %+7.1fR $%+6.0f  ->  %3d trades %+7.1fR $%+6.0f%s%s" % (
                 a, s0["n"], s0.get("R", 0), s0.get("usd", 0), s1["n"], s1.get("R", 0), s1.get("usd", 0),
-                "   (paper market: not traded live)" if a in paper else ""))
+                "   (paper market: not traded live)" if a in paper else "",
+                "   (%d trades of these rows ran on APPROXIMATE half-hours)" % n_ap if n_ap else ""))
         b14 = W["B14"]
         wit1 = [x for x in b14 if x["f"].get("ns_b14n_witness")]
         wit0 = [x for x in b14 if not x["f"].get("ns_b14n_witness")]
@@ -664,6 +775,9 @@ def main():
         pk["windows"][wname] = {rid: W[rid] for rid in rows}
     say("\n   taken at once on a witness ([DIAG-CONFIRM], whole replay): S0 %d (3-touch diagonals) -> B14 %d (2+-touch diagonals and the six MAs)" % (
         LOG_N[("S0", "confirm")], LOG_N[("B14", "confirm")]))
+    if NO_M30:
+        say("\n   entries left out because no 30-minute candle reaches back to them (all rows): %s" % ", ".join(
+            "%s %d" % (a, n) for a, n in sorted(NO_M30.items())))
     say("\nIDENTITY: %s" % verdict)
     say("done in %.0f s" % (time.time() - t0))
     os.makedirs("logs", exist_ok=True)

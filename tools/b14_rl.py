@@ -590,6 +590,10 @@ def main():
         say("no market could be loaded -- nothing learned this time")
         return 1
     data, windows, t_end = P["data"], P["windows"], P["t_end"]
+    _ap = ["%s (%s)" % (a, "all" if D["m30_real_from"] == pd.Timestamp.max else "before %s" % str(D["m30_real_from"])[:10])
+           for a, D in data.items() if D.get("m30_real_from") is not None]
+    if _ap:          # B14 Part 4 (R-5): never silent -- the box test's prepare() lines are hidden here
+        say("NOTE: APPROXIMATE half-hours (made from the hourly file; MT5 had none that far back) for: %s" % ", ".join(_ap))
     if len(windows) < 2:
         say("only %d months of prices -- the second sample is needed before anything can be suggested" % args.months)
     W = {"w1": windows[0][1]}
