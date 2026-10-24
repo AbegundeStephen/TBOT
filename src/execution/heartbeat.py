@@ -59,7 +59,10 @@ class _TailHandler(logging.Handler):
     def __init__(self, maxlen=50000):
         super().__init__()
         self.buffer = deque(maxlen=maxlen)
-        self._lock = threading.Lock()
+        # B14 Part 4 (item 16): re-entrant. A log line written from inside a signal handler on the same thread while
+        # emit() holds the lock (20 Oct: froze the bot 3 of 3 with a plain Lock) now goes through instead of waiting
+        # for itself forever. Part 3's guard no longer logs from a signal; this closes the door behind it.
+        self._lock = threading.RLock()
         self.started_at = time.time()   # HF-2 H4: warm-up window anchor
         self._watch = []                # B6-8: [(tag, matcher)] from the registry
         self.by_tag = {}                # B6-8: tag -> deque of (ts, msg)
@@ -562,8 +565,15 @@ class HeartbeatMonitor:
         so an offline tool that hasn't run yet must not page anyone."""
         pattern = p["file"]
         win_s = p.get("window_min", 10080) * 60
+        # B14 Part 4 (item 17): "grace_min" -- skip while the bot itself has been up less than that (after a start the
+        # file's owner may not have written yet); "missing_fails" -- a file that is not there at all is a failure too.
+        _grace = p.get("grace_min")
+        if _grace and time.time() - self.handler.started_at < float(_grace) * 60:
+            return True, ""
         matches = glob.glob(pattern)
         if not matches:
+            if p.get("missing_fails"):
+                return False, f"{pattern}: not found"
             return True, ""
         newest = max(os.path.getmtime(m) for m in matches)
         ok = (time.time() - newest) <= win_s

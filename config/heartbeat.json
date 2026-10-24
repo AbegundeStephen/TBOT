@@ -1053,6 +1053,16 @@
       "window_min": 1440,
       "note": "B14 Part 2 (Desire 16 Oct): a 1H/4H price file is missing candles the market should have made, or is behind",
       "enabled": true
+    },
+    {
+      "id": "b14p4.watchdog_alive",
+      "type": "file_fresh",
+      "file": "data/watchdog_state.json",
+      "window_min": 30,
+      "grace_min": 20,
+      "missing_fails": true,
+      "note": "B14 Part 4 item 17 (Desire 23 Oct): the outside watchdog rewrites its state file data/watchdog_state.json at every run (every 5 minutes, during a pause too; nothing else writes it). Not rewritten for 30 minutes (or no file) means it has stopped, so nothing would restart the bot if it died. Skipped for the first 20 minutes after the bot starts.",
+      "enabled": true
     }
   ],
   "daily_break_ny": {

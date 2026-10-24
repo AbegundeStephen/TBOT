@@ -37,7 +37,9 @@ from telegram.ext import (
     filters,
 )
 from telegram.constants import ParseMode
-from telegram.error import NetworkError, TimedOut, RetryAfter, TelegramError
+from telegram.error import NetworkError, TimedOut, RetryAfter, TelegramError, BadRequest   # BadRequest: B14 Part 4 (Desire 23 Oct)
+import contextvars as _b14p4_cv   # B14 Part 4 (Desire 23 Oct): keep_for_later knows when it runs inside a round of kept alerts
+_B14P4_IN_ROUND = _b14p4_cv.ContextVar("b14p4_in_round", default=None)
 
 logger = logging.getLogger(__name__)
 
@@ -286,13 +288,16 @@ class TradingTelegramBot:
             if self._waiting_since is None:
                 self._waiting_since = time.time()
             if len(self._waiting) >= self.WAIT_MAX:
-                _t, _old, _l = self._waiting.popleft()
+                _old = self._waiting.popleft()[1]   # B14 Part 4 (Desire 23 Oct): an entry may carry a 4th field (its tries)
                 self._waiting_dropped += 1
                 if asyncio.iscoroutine(_old):
                     _old.close()
             self._waiting.append((time.time(), item, label))
             self._waiting_gen += 1
             n = len(self._waiting)
+            _rc = _B14P4_IN_ROUND.get()
+            if _rc is not None:
+                _rc[0] += 1     # B14 Part 4: kept again from inside a round of kept alerts (a kept send failed): it stops
         (logger.warning if first else logger.info)(
             "[TELEGRAM] not sent now -- kept, sent once Telegram is back (%d waiting)%s", n, (": " + label) if label else "")
 
@@ -320,12 +325,19 @@ class TradingTelegramBot:
                 logger.warning("[TELEGRAM] a send was still running after %ss -- it carries on (%s)", wait,
                                str(e) or type(e).__name__)
 
+    WAIT_TRIES = 3   # B14 Part 4 (Desire 23 Oct): a kept message failing this many rounds while the 'delayed' line goes out is given up, with a notice
+
     async def send_waiting(self):
         """B14 (Desire 16 Oct): send the kept alerts, oldest first, after one line saying they are late. Runs in the
-        bot's own loop, one at a time; stops (keeping the rest) as soon as a send has to be kept again."""
+        bot's own loop, one at a time; stops (keeping the rest) as soon as a send has to be kept again.
+        B14 Part 4 (Desire 23 Oct): only alerts that really went out are counted (a failed one used to be counted as
+        sent); a kept message that fails again goes back to the FRONT of the line, so the order stays, and the round
+        stops there; one that fails WAIT_TRIES rounds while Telegram takes the 'delayed' line is given up, and a short
+        plain notice with its first line says so (it used to be tried again every ~6 minutes for ever)."""
         if self._flushing or not self._waiting:
             return 0
         self._flushing = True
+        _round_tok = _B14P4_IN_ROUND.set([0])   # B14 Part 4: counts what gets kept again from inside this round
         n = 0
         try:
             with self._waiting_lock:
@@ -342,23 +354,49 @@ class TradingTelegramBot:
                     if not self._waiting:
                         self._waiting_dropped, self._waiting_since = 0, None
                         break
-                    _t, item, label = self._waiting.popleft()
-                    g0 = self._waiting_gen
+                    _e = self._waiting.popleft()
+                _t, item, label = _e[0], _e[1], _e[2]
+                tries = _e[3] if len(_e) > 3 else 0  # B14 Part 4: rounds it already failed while Telegram was up
+                ok, stop = False, False
                 try:
                     if asyncio.iscoroutine(item):
-                        await item
+                        # a send started once cannot start again (a card says itself if it failed). Some kept sends
+                        # (the notify_* ones) return nothing and keep their text themselves when Telegram fails:
+                        # that keep is counted here, so the round still stops and doesn't count it as sent
+                        _kc = _B14P4_IN_ROUND.get()
+                        _k0 = _kc[0] if _kc is not None else 0
+                        _res = await item
+                        _kept = _kc is not None and _kc[0] != _k0
+                        ok = (_res is not False) and not _kept
+                        stop = not ok                    # kept again inside, or failed: Telegram is failing -- stop here
                     else:
                         _msg, _pm, _dp = item
-                        await self.send_notification(_msg, disable_preview=_dp, parse_mode=_pm)
-                    n += 1
+                        _o = {}
+                        ok = await self.send_notification(_msg, disable_preview=_dp, parse_mode=_pm, _keep=False,
+                                                          _out=_o)
+                        if not ok and (_o.get("net") or _o.get("down")):
+                            stop = True                  # Telegram is failing -- stop here
+                            tries += 0 if _o.get("down") else 1
+                            if tries >= self.WAIT_TRIES:
+                                logger.error("[TELEGRAM] a delayed alert failed %d rounds while the 'delayed' line went "
+                                             "out -- given up, a notice sent instead: %s", tries, label)
+                                await self._say_not_sent(_msg, "it failed %d times in a row while other messages went "
+                                                               "through" % tries)
+                            else:
+                                with self._waiting_lock:
+                                    self._waiting.appendleft((_t, item, label, tries))   # back to the FRONT: the order stays
+                        # refused by Telegram itself: not kept -- send_notification has sent the notice
                 except Exception as e:
                     logger.error("[TELEGRAM] a delayed alert failed: %s", e)
-                if self._waiting_gen != g0:
-                    break                             # it had to be kept again: Telegram is failing -- stop here
+                if ok:
+                    n += 1
+                if stop:
+                    break
             if n:
                 logger.info("[TELEGRAM] %d delayed alert(s) sent (%d still waiting)", n, len(self._waiting))
             return n
         finally:
+            _B14P4_IN_ROUND.reset(_round_tok)
             self._flushing = False
 
     def _run_in_loop(self, coro, timeout: float = 30.0):
@@ -429,6 +467,9 @@ class TradingTelegramBot:
         self.application.add_handler(CommandHandler("reverse", self.cmd_reverse))
         self.application.add_handler(CommandHandler("moves", self.cmd_moves))
         self.application.add_handler(CommandHandler("resume_sl", self.cmd_resume_sl))
+        # B14 Part 4 (Desire 23 Oct): /approve lists the open suggestions; /approve N or one tap on /approve_N applies one
+        self.application.add_handler(CommandHandler("approve", self.cmd_approve))
+        self.application.add_handler(MessageHandler(filters.Regex(r"^/approve_\d+(@\w+)?\s*$"), self.cmd_approve))
         self.application.add_handler(CommandHandler("reset_equity", self.cmd_reset_equity))
         self.application.add_handler(CommandHandler("stats", self.cmd_signal_stats))
         self.application.add_handler(CommandHandler("regimes", self.cmd_regimes))
@@ -615,11 +656,12 @@ class TradingTelegramBot:
             "/positions — Open positions with P&amp;L, SL, TP, VTM state\n"
             "/vtm — VTM live stop/target levels per position\n"
             "/vtm_status — Full VTM override breakdown with hints\n"
-            "/set_sl ASSET PRICE — Move stop loss on a live position\n"
-            "/set_tp ASSET PRICE [TIER] — Move take profit (tier optional)\n"
+            "/set_sl ASSET PRICE — Move stop loss on a live position (the trade goes hands-off)\n"
+            "/set_tp ASSET PRICE [TIER] — Move take profit (tier optional; the trade goes hands-off)\n"
             "/moves ASSET — Last 10 automated/manual SL+TP moves for a position\n"
-            "/reverse ASSET MOVE_ID — Undo the latest automated move, pauses auto-SL\n"
-            "/resume_sl ASSET — Re-enable automated SL management after /reverse\n"
+            "/reverse ASSET MOVE_ID — Undo the latest automated move (the trade goes hands-off)\n"
+            "/approve — The bot's suggestions on hands-off trades; /approve N (or tap /approve_N) applies one\n"
+            "/resume_sl ASSET — End hands-off: the bot manages that trade's SL and TP again\n"
             "/history — Last 10 closed trades with P&amp;L and hold time\n"
             "/performance — Win rate, profit factor, drawdown, equity curve\n\n"
 
@@ -1424,6 +1466,7 @@ class TradingTelegramBot:
             logger.error(f"[TG] /vtm_status error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
+    @admin_only   # B14 Part 4 (Desire 23 Oct): only Desire moves his stops (it had no check: anyone could)
     async def cmd_set_sl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         /set_sl <asset> <new_stop_loss_price>
@@ -1470,11 +1513,16 @@ class TradingTelegramBot:
                 return
 
             position = matched[0]
+            _ho_after = self._b14p4_hold(position.trade_manager, "set_sl")   # B14 Part 4: hands-off before the change
             result = position.trade_manager.override_stop_loss(new_sl)
+            _ho_after(result)
 
             # Sync portfolio_manager's cached stop loss so it stays consistent
             if "✅" in result:
                 position.stop_loss = new_sl
+                if callable(getattr(position.trade_manager, "start_hands_off", None)):
+                    result += (f"\n🤚 Hands-off: the bot won't move this trade's SL or TP by itself now -- it suggests, "
+                               f"you approve (/approve lists them). /resume_sl {position.asset} hands it back.")
 
                 # Immediately push the new SL to the broker.
                 # Without this, the VTM loop only pushes when it naturally
@@ -1515,6 +1563,7 @@ class TradingTelegramBot:
             logger.error(f"[TG] /set_sl error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
+    @admin_only   # B14 Part 4 (Desire 23 Oct): only Desire moves his targets (it had no check: anyone could)
     async def cmd_set_tp(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         /set_tp <asset> <new_tp_price> [tier_index]
@@ -1569,7 +1618,12 @@ class TradingTelegramBot:
                 return
 
             position = matched[0]
+            _ho_after = self._b14p4_hold(position.trade_manager, "set_tp")   # B14 Part 4: hands-off before the change
             result = position.trade_manager.override_take_profit(new_tp, target_index=tier)
+            _ho_after(result)
+            if "✅" in result and callable(getattr(position.trade_manager, "start_hands_off", None)):
+                result += (f"\n🤚 Hands-off: the bot won't move this trade's SL or TP by itself now -- it suggests, "
+                           f"you approve (/approve lists them). /resume_sl {position.asset} hands it back.")
 
             # Sync portfolio_manager's cached take profit (tier-0 = primary TP)
             if "✅" in result and tier == 0:
@@ -1610,6 +1664,7 @@ class TradingTelegramBot:
             logger.error(f"[TG] /set_tp error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
+    @admin_only   # B14 Part 4 (Desire 23 Oct): only Desire reverses the bot's moves (it had no check: anyone could)
     async def cmd_reverse(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
         /reverse <asset> <move_id>
@@ -1684,13 +1739,17 @@ class TradingTelegramBot:
                         f"(it was the first stop ever set for this position)."
                     )
                     return
+                _ho_after = self._b14p4_hold(tm, "reverse")   # B14 Part 4: hands-off before the change
                 result = tm.override_stop_loss(float(target))  # reuses validation + logging
+                _ho_after(result)
                 if "❌" in result:
                     await update.message.reply_text(
                         f"Reversal rejected: {html.escape(result)}", parse_mode="HTML"
                     )
                     return
                 tm._auto_sl_paused = True
+                if callable(getattr(tm, "start_hands_off", None)):
+                    tm.start_hands_off("reverse")   # B14 Part 4 (Desire 23 Oct): the pause now covers TP too, with suggestions
                 # override_stop_loss already recorded a MANUAL move for the restore
                 # itself (old=last['new'], new=target) — no separate _record_auto_move
                 # call needed here, matching how /set_sl's own writes get recorded.
@@ -1715,8 +1774,8 @@ class TradingTelegramBot:
 
                 await update.message.reply_text(
                     f"⏪ Reversed #{move_id}: SL back to {float(target):.5f}.\n"
-                    f"⏸️ Auto-SL PAUSED for {tm.asset} — protection still armed, "
-                    f"movement stopped. /resume_sl {tm.asset} to re-enable."
+                    f"🤚 Hands-off for {tm.asset}: the bot won't move its SL or TP by itself -- it suggests, you "
+                    f"approve (/approve lists them). /resume_sl {tm.asset} hands it back."
                 )
             else:  # TP
                 # Some automated TP moves rewrite the whole ladder (greed-mode
@@ -1724,18 +1783,39 @@ class TradingTelegramBot:
                 # `old`/`new` can be a list, not a single price — override_take_profit
                 # only handles a single tier. Restore the list directly when needed.
                 if isinstance(target, list):
+                    self._b14p4_hold(tm, "reverse")   # B14 Part 4: hands-off before the change
                     _old_list = list(tm.take_profit_levels)
                     tm.take_profit_levels = list(target)
                     tm._record_auto_move("TP", _old_list, list(target), f"reverse_of_{move_id}", source="MANUAL")
+                    _ho_line = ""
+                    if callable(getattr(tm, "start_hands_off", None)):
+                        tm.start_hands_off("reverse")   # B14 Part 4 (Desire 23 Oct)
+                        _ho_line = (f"\n🤚 Hands-off for {tm.asset}: the bot won't move its SL or TP by itself -- it "
+                                    f"suggests, you approve (/approve lists them). /resume_sl {tm.asset} hands it back.")
                     await update.message.reply_text(
-                        f"⏪ Reversed #{move_id}: TP levels restored to {target}."
+                        f"⏪ Reversed #{move_id}: TP levels restored to {target}." + _ho_line
                     )
                 elif target is None:
                     await update.message.reply_text(
                         f"❌ Move #{move_id} had no prior TP to restore to."
                     )
                 else:
-                    result = tm.override_take_profit(float(target))
+                    # B14 Part 4 (Desire 23 Oct): put it back on the target that moved (a zone advance moves the LAST
+                    # one; index 0 used to write it into TP1)
+                    _rem = [i for i in range(len(tm.take_profit_levels)) if i not in tm.partials_hit]
+                    _ti = 0
+                    try:
+                        _tol = 1e-9 * max(1.0, abs(float(last["new"])))
+                        _ti = next((k for k, i in enumerate(_rem)
+                                    if abs(float(tm.take_profit_levels[i]) - float(last["new"])) <= _tol), 0)
+                    except Exception:
+                        _ti = 0
+                    _ho_after = self._b14p4_hold(tm, "reverse")   # B14 Part 4: hands-off before the change
+                    result = tm.override_take_profit(float(target), target_index=_ti)
+                    _ho_after(result)
+                    if "✅" in result and callable(getattr(tm, "start_hands_off", None)):
+                        result += (f"\n🤚 Hands-off for {tm.asset}: the bot won't move its SL or TP by itself -- it "
+                                   f"suggests, you approve (/approve lists them). /resume_sl {tm.asset} hands it back.")
                     await update.message.reply_text(
                         f"⏪ Reversed #{move_id}: {html.escape(result)}", parse_mode="HTML"
                     )
@@ -1799,8 +1879,10 @@ class TradingTelegramBot:
             logger.error(f"[TG] /moves error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
 
+    @admin_only   # B14 Part 4 (Desire 23 Oct): only Desire hands a trade back (it had no check: anyone could)
     async def cmd_resume_sl(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """/resume_sl <asset> — re-enable automated SL management after /reverse."""
+        """/resume_sl <asset> — re-enable automated SL management after /reverse.
+        B14 Part 4 (Desire 23 Oct): ends hands-off -- the bot manages that trade's SL and TP again."""
         try:
             if not self.trading_bot:
                 await update.message.reply_text("⚠️ Trading bot not connected")
@@ -1829,12 +1911,113 @@ class TradingTelegramBot:
                 return
 
             tm = matched[0].trade_manager
-            tm._auto_sl_paused = False
-            await update.message.reply_text(f"▶️ Auto-SL resumed for {tm.asset}.")
+            if callable(getattr(tm, "end_hands_off", None)):
+                tm.end_hands_off()   # B14 Part 4 (Desire 23 Oct): also clears the pause and the open suggestions
+                await update.message.reply_text(f"▶️ The bot manages {tm.asset}'s SL and TP again (hands-off ended).")
+            else:
+                tm._auto_sl_paused = False
+                await update.message.reply_text(f"▶️ Auto-SL resumed for {tm.asset}.")
 
         except Exception as e:
             logger.error(f"[TG] /resume_sl error: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {e}")
+
+    @admin_only
+    async def cmd_approve(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """B14 Part 4 (Desire 23 Oct): /approve lists the open suggestions on the trades Desire has taken over;
+        /approve N, or one tap on /approve_N, applies suggestion N the way /set_sl or /set_tp would (same checks,
+        recorded as his, pushed to the exchange). The trade stays hands-off."""
+        msg = update.effective_message
+        try:
+            if not self.trading_bot:
+                await msg.reply_text("⚠️ Trading bot not connected")
+                return
+            import re as _re_ap
+            _m = _re_ap.match(r"^/approve_(\d+)", (msg.text or "").strip())
+            sid = int(_m.group(1)) if _m else None
+            if sid is None and context.args:
+                try:
+                    sid = int(str(context.args[0]).lstrip("#"))
+                except ValueError:
+                    await msg.reply_text(f"❌ Invalid suggestion number: {context.args[0]}")
+                    return
+            found = []
+            for _p in list(self.trading_bot.portfolio_manager.positions.values()):
+                _tm = getattr(_p, "trade_manager", None)
+                if _tm is not None and callable(getattr(_tm, "open_suggestions", None)):
+                    for _r in _tm.open_suggestions():
+                        found.append((_p, _tm, _r))
+            if sid is None:
+                if not found:
+                    await msg.reply_text("ℹ️ No open suggestions.")
+                    return
+                found.sort(key=lambda x: int(x[2].get("id", 0)))
+                await msg.reply_text("\n\n".join(_r["text"] for _p, _tm, _r in found))
+                return
+            hit = [x for x in found if int(x[2].get("id", -1)) == sid]
+            if not hit:
+                await msg.reply_text(f"ℹ️ Suggestion #{sid} is not open any more (replaced, approved, or the trade "
+                                     f"closed). /approve lists the open ones.")
+                return
+            position, tm, _r = hit[0]
+            _last_before = (list(getattr(tm, "take_profit_levels", None) or []) or [None])[-1]
+            ok, result, push = tm.approve_suggestion(sid)
+            if ok and push:
+                result += self._b14p4_push(position, tm, push, _last_before)
+            logger.info("[TG] /approve #%d: %s", sid, (result or "").splitlines()[0] if result else "")
+            await msg.reply_text(result)
+        except Exception as e:
+            logger.error(f"[TG] /approve error: {e}", exc_info=True)
+            await msg.reply_text(f"❌ Error: {e}")
+
+    def _b14p4_hold(self, tm, by):
+        """B14 Part 4 (Desire 23 Oct): hands-off starts BEFORE his change goes in, so no trade tick can move it back in
+        between. Returns a function that hands the trade back if his change was refused and it wasn't hands-off
+        before."""
+        if not callable(getattr(tm, "start_hands_off", None)):
+            return lambda result: None
+        was = tm.hands_off_on()
+        tm.start_hands_off(by)
+
+        def _after(result):
+            if not was and "✅" not in str(result):
+                tm.end_hands_off("his /%s was refused" % by)
+        return _after
+
+    def _b14p4_push(self, position, tm, what, last_before=None):
+        """B14 Part 4: an approved SL/TP goes to the exchange at once, the way /set_sl pushes its stop (the trade loop
+        only pushes changes made inside its own tick). For targets, MT5 holds the FINAL target only (R1, mt5_handler):
+        it is pushed only when the approval changed the final target -- never TP1, which would close the whole
+        position there."""
+        try:
+            _last = None
+            if what == "SL":
+                position.stop_loss = tm.current_stop_loss
+            else:
+                _lv = list(getattr(tm, "take_profit_levels", None) or [])
+                _last = _lv[-1] if _lv else None
+                if _last is None or (last_before is not None and abs(float(_last) - float(last_before)) <= 1e-12):
+                    return ""            # the final target didn't change: MT5 keeps its target
+                position.take_profit = _last
+            asset_cfg = self.trading_bot.config.get("assets", {}).get(position.asset, {})
+            trading_cfg = self.trading_bot.config.get("trading", {})
+            mt5_handler = getattr(self.trading_bot, "mt5_handler", None)
+            flag = "place_vtm_sl_on_exchange" if what == "SL" else "place_vtm_tp_on_exchange"
+            if not (asset_cfg.get("exchange", "mt5") == "mt5" and mt5_handler and position.mt5_ticket
+                    and trading_cfg.get(flag, False)):
+                return ""
+            symbol = mt5_handler._resolve_symbol(position.asset)
+            if not symbol:
+                return ""
+            if what == "SL":
+                ok = mt5_handler._push_sl_to_exchange(position.mt5_ticket, symbol, tm.current_stop_loss)
+            else:
+                ok = mt5_handler._push_tp_to_exchange(position.mt5_ticket, symbol, _last)
+            return ("\n📡 Exchange %s updated ✅" % what) if ok else ("\n⚠️ Exchange %s push failed — check VTM-%s logs"
+                                                                     % (what, what))
+        except Exception as _push_err:
+            logger.error(f"[TG] /approve exchange push failed: {_push_err}")
+            return "\n⚠️ Exchange push error — see bot logs"
 
     async def cmd_reset_equity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
@@ -3829,7 +4012,7 @@ class TradingTelegramBot:
                                             parse_mode=parse_mode)
 
     async def send_notification(self, message: str, disable_preview: bool = True, parse_mode=_PARSE_MODE_UNSET,
-                                _keep: bool = True):
+                                _keep: bool = True, _out=None):
         """
         Send notification with proper error handling and retry logic.
         parse_mode: "HTML" | "Markdown" | None (None = no entity parsing,
@@ -3840,6 +4023,12 @@ class TradingTelegramBot:
         double every alert into the same chat with no way to tell which
         instance sent it. Prefixed here, once, rather than at every one of
         the many call sites across the codebase.
+
+        B14 Part 4 (Desire 23 Oct): when Telegram refuses the message ITSELF (an HTTP 400 "BadRequest", e.g.
+        "Can't parse entities" from a lone "_" such as b14_ladder1 in Markdown), that is not a network fault: it is
+        sent again at once as plain text; if Telegram refuses that too, a short plain notice says so and it is not
+        kept (it could never go through). It used to be taken for a network error: 65 s of retries, then kept and
+        tried again every ~6 minutes for ever. _out (a dict, optional, for send_waiting): told what happened.
         """
         if os.environ.get("TBOT_INSTANCE") and not message.startswith(f"[{os.environ['TBOT_INSTANCE']}] "):
             message = f"[{os.environ['TBOT_INSTANCE']}] {message}"
@@ -3847,8 +4036,11 @@ class TradingTelegramBot:
             # B14 (Desire 16 Oct): kept and sent once Telegram is back (it used to go into a queue nothing read)
             if _keep:
                 self.keep_for_later((message, parse_mode, disable_preview), message[:60])
+            if _out is not None:
+                _out["down"] = True                   # B14 Part 4: Telegram not up at all
             return False
         _net_fail = False   # B14: a timeout / network / closed-loop failure -> kept for later if no admin got it
+        _refused = ""       # B14 Part 4 (Desire 23 Oct): Telegram's reason, when it refused the message itself
 
         effective_parse_mode = ParseMode.MARKDOWN if parse_mode is _PARSE_MODE_UNSET else parse_mode
         success_count = 0
@@ -3885,6 +4077,53 @@ class TradingTelegramBot:
                             f"[TELEGRAM] Failed to send to {admin_id} after {max_retries} attempts"
                         )
 
+                except BadRequest as e:
+                    # B14 Part 4 (Desire 23 Oct): Telegram answered and refused the message itself -- no waiting, no
+                    # reconnect, never kept (a BadRequest is also a NetworkError, so it used to land in the branch below)
+                    _why = str(e) or type(e).__name__
+                    if effective_parse_mode is not None and ("parse entities" in _why.lower()
+                                                             or "parse message text" in _why.lower()):
+                        logger.warning("[TELEGRAM] Telegram could not read the formatting (%s) -- sent again as plain "
+                                       "text: %s", _why, message[:60])
+                        effective_parse_mode = None      # this message, from here on: plain text
+                        try:
+                            await asyncio.wait_for(
+                                self.application.bot.send_message(
+                                    chat_id=admin_id,
+                                    text=message,
+                                    parse_mode=None,
+                                    disable_web_page_preview=disable_preview,
+                                ),
+                                timeout=15.0,
+                            )
+                            success_count += 1
+                            break                        # sent, as plain text
+                        except BadRequest as e2:
+                            _why = "as plain text too: %s" % (str(e2) or type(e2).__name__)
+                        except Exception as e2:
+                            _net_fail = True             # a network hiccup on the plain try: the usual retries carry on (plain)
+                            logger.warning(f"[TELEGRAM] Network error to {admin_id} (plain-text try): {e2}")
+                            continue
+                    _refused = _why
+                    logger.error("[TELEGRAM] Telegram refused the message to %s (%s) -- not kept (it could never go "
+                                 "through): %s", admin_id, _why, message[:60])
+                    break
+
+                except RetryAfter as e:
+                    # B14 Part 4 (Desire 23 Oct, 3a): Telegram's flood limit ("too many messages, wait N s"): wait the
+                    # time it asks (up to 60 s) and try again; if the tries run out it is kept for later. It used to
+                    # land in the general branch below: the alert was dropped with only a log line.
+                    _net_fail = True
+                    try:
+                        _ra = getattr(e, "_retry_after", None) or getattr(e, "retry_after", 5)
+                        _ra = float(_ra.total_seconds()) if hasattr(_ra, "total_seconds") else float(_ra)
+                    except Exception:
+                        _ra = 5.0
+                    logger.warning(f"[TELEGRAM] Telegram's flood limit to {admin_id}: waiting {_ra:.0f}s, then trying "
+                                   f"again (attempt {attempt + 1}/{max_retries})")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(min(60.0, max(1.0, _ra)))
+
                 except (NetworkError, TimedOut) as e:
                     _net_fail = True
                     logger.warning(f"[TELEGRAM] Network error to {admin_id}: {e}")
@@ -3917,8 +4156,33 @@ class TradingTelegramBot:
         else:
             logger.error("[TELEGRAM] Failed to send to any admin")
             if _keep and _net_fail:
-                self.keep_for_later((message, parse_mode, disable_preview), message[:60])   # B14: sent once it is back
+                # B14: sent once it is back (B14 Part 4: as plain text if Telegram could not read its formatting)
+                self.keep_for_later((message, None if effective_parse_mode is None else parse_mode, disable_preview),
+                                    message[:60])
+            elif _refused:
+                await self._say_not_sent(message, "Telegram refused it: %s" % _refused)
+        if _out is not None:
+            _out["net"] = bool(_net_fail) and success_count == 0
+            _out["refused"] = bool(_refused) and success_count == 0
         return success_count > 0
+
+    async def _say_not_sent(self, message, why):
+        """B14 Part 4 (Desire 23 Oct): an alert that could not be sent says so -- one short plain line with its first
+        line, one try, never kept -- so it does not go missing silently."""
+        first = (str(message).strip().splitlines() or [""])[0][:200]
+        note = "⚠️ An alert could not be sent (%s). Its first line:\n%s" % (str(why)[:200], first)
+        if os.environ.get("TBOT_INSTANCE") and not note.startswith(f"[{os.environ['TBOT_INSTANCE']}] "):
+            note = f"[{os.environ['TBOT_INSTANCE']}] {note}"
+        for admin_id in self.admin_ids:
+            try:
+                await asyncio.wait_for(
+                    self.application.bot.send_message(chat_id=admin_id, text=note, parse_mode=None,
+                                                      disable_web_page_preview=True),
+                    timeout=15.0,
+                )
+                logger.warning("[TELEGRAM] notice sent: an alert could not be sent (%s): %s", why, first[:60])
+            except Exception as e:
+                logger.error("[TELEGRAM] the notice that an alert could not be sent failed too (%s): %s", e, first[:60])
 
     def _b13_usdjpy(self):
         """B13 item 18 (Desire 5 Oct): a live USDJPY price from MT5 (the bot's own connection), to show yen sums in

@@ -432,6 +432,13 @@ class NSEngine:
             except Exception as _we:
                 self._wit14n = None
                 self._log.warning("[B14] %s: witness list not built (%s) -- the 3-touch list is used this look", self.asset, _we)
+        elif self.variant is not None and cfg.get("b14n"):
+            # B14 Part 4 (W4, Desire 21 Oct "(a) in (1)"): lane X builds the same witness list for its B14 LABELS only
+            # (see _candidate). Its own B13 diagonal rule (_dbrk4) stays off, exactly as before.
+            try:
+                self._wit14n = B14.witness_breaks(self._map, t4, a4, c4)
+            except Exception:
+                self._wit14n = None
 
         n1 = len(t1)
         _rev = self._revised(st, t1, hi1, lo1, c1)
@@ -520,7 +527,7 @@ class NSEngine:
     # are logged, never traded). Kept: the 4H brain (rule-free), its level history, the package's records, its
     # waiting entries and the chart's recent proofs.
     _KEEP_ON_REBUILD = ("brain4_m", "brain4_t", "brain4_prev", "brain_hist", "levels2", "pkg", "pkg_ready",
-                        "proofs_hist")
+                        "proofs_hist", "brain4_piv")
 
     def _rules_check(self, st, cfg):
         stamp = rules_stamp(cfg, self.variant)
@@ -620,10 +627,26 @@ class NSEngine:
         if lsm is None or not len(t4):
             return
         m, last = st.get("brain4_m"), st.get("brain4_t")
+        # B14 Part 4 (review): only the four settings the brain is built from count -- a note (_calibration, _watch)
+        # edited in the presets file never rebuilds a brain
+        _want = _brain_keys(piv.get(self.asset, {}) or {})
+        if m is not None and "brain4_piv" in st and _brain_keys(st["brain4_piv"]) != _want:
+            # B14 Part 4 (W9): this market's brain settings changed (config/aggregator_presets.json LIVERMORE_PIVOTS).
+            # The saved brain was built with the old ones and kept them silently through every restart and rebuild --
+            # it is now built again from every 4H candle on hand, exactly as after a reset.
+            self._log.warning("[NS-BRAIN] %s: 4H brain settings changed %s -> %s -- the brain is rebuilt from the %d 4H "
+                              "candles on hand", self.asset, _brain_keys(st["brain4_piv"]), _want, len(t4))
+            m = None
         if m is None:
             m = lsm.make_livermore_pair(self.asset, piv.get(self.asset, {}))[0]
             st["brain4_m"], st["brain4_prev"], last = m, {}, None
             st["brain_hist"] = [x for x in st.get("brain_hist", []) if x[0] != "4H"]
+        # a brain saved before Part 4 has no record of its settings: it is taken to be built with today's (no rebuild)
+        st["brain4_piv"] = _want
+        if not getattr(self, "_brain_said", False):
+            self._brain_said = True
+            self._log.info("[NS-BRAIN] %s: 4H brain settings in use: %s", self.asset,
+                           _want if _want else "the code's defaults (no settings for it in the presets file)")
         fr = pd.DataFrame({"high": np.asarray(hi4, float), "low": np.asarray(lo4, float), "close": np.asarray(c4, float)},
                           index=pd.DatetimeIndex(t4))
         atr = lsm.atr14(fr).values
@@ -638,7 +661,12 @@ class NSEngine:
             last = tk
             try:
                 s_ = m.update(float(c4[k]), float(atr[k]))
-            except Exception:
+            except Exception as _e:
+                # B14 Part 4 (review): this used to be silent -- a brain that can't take its candles froze with no line
+                if not getattr(self, "_brain_err_said", False):
+                    self._brain_err_said = True
+                    self._log.warning("[NS-BRAIN] %s: the 4H brain could not take the candle of %s (%s: %s) -- that candle "
+                                      "is skipped (said once)", self.asset, tk, type(_e).__name__, _e)
                 continue
             up = s_.state in UP4
             for key, v in (("up", s_.anchor_main_up_max if up else None), ("down", None if up else s_.anchor_main_down_min),
@@ -983,6 +1011,20 @@ class NSEngine:
         fields["ns_explore"] = self.variant
         if b14n is not None:
             fields.update(b14n["fields"])                   # B14: witness, target kind, clearance, lines ahead
+        elif self.variant is not None and cfg.get("b14n") and style == "E" and stop is not None:
+            # B14 Part 4 (W4, Desire 21 Oct "(a) in (1)"): lane X's practice trades carry the B14 facts as LABELS ONLY --
+            # what the B14 rules would have said about this entry (witness, line target, clearance, lines ahead). The
+            # practice trade keeps today's target and exit: the ladder switch ("ns_b14n"), the rungs and the two trade
+            # manager target fields are left out, so nothing about how it runs changes.
+            try:
+                _lab = self._b14n_plan(cfg, d, e, stop, target, atr, float(s["atr4"]), t,
+                                       float(s.get("h2_frozen", s["h2"])))["fields"]
+                for _k in ("ns_b14n", "ns_b14n_ladder", "ns_b14n_ladder_def", "ns_target_kind", "ns_target_atr"):
+                    _lab.pop(_k, None)
+                _lab["ns_b14n_label_only"] = True
+                fields.update(_lab)
+            except Exception as _le:
+                fields["ns_b14n_label_only"] = "not built: %s" % _le
         if kind == "MR_REV":
             fields.update({"setup_active_mr": True, "setup_kind_mr": kind, "setup_dir_mr": d,
                            "setup_age_mr": fields["setup_age"], "setup_ref_mr": float(r2),
@@ -1277,6 +1319,30 @@ def _open_4h_gap_near(hi4, lo4, k4, bull, x, band):
 
 UP4 = ("MAIN_UP", "NATURAL_RETRACEMENT", "SECONDARY_RETRACEMENT")     # as the research's UP
 _LSM_CACHE = {}
+_BRAIN_KEYS = ("major_mult", "minor_mult", "dual_confirm", "atr_period")   # what make_livermore_pair reads
+
+
+def _brain_keys(d):
+    """B14 Part 4 (review): only the settings a 4H brain is built from, in a fixed order (notes left out)."""
+    return {k: d[k] for k in _BRAIN_KEYS if k in d} if isinstance(d, dict) else {}
+
+
+def _brain_num(key, x):
+    """B14 Part 4 (review): a brain setting as a usable number, or None -- the two multipliers above 0, the confirm
+    count and the ATR period whole numbers from 1. A number stays as it is; a quoted one ("4.0") is read as a number."""
+    if isinstance(x, bool):
+        return None
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")) or f <= 0:
+        return None
+    if key in ("dual_confirm", "atr_period") and (f != int(f) or f < 1):
+        return None
+    if isinstance(x, (int, float)):
+        return x
+    return int(f) if key in ("dual_confirm", "atr_period") else f
 
 
 def _lsm_mod():
@@ -1286,7 +1352,41 @@ def _lsm_mod():
             from src.execution import livermore_state_machine as _m
             import json as _json
             import os as _os
-            _p = _json.load(open(_os.path.join("config", "aggregator_presets.json"), encoding="utf-8-sig")).get("LIVERMORE_PIVOTS", {})
+            _pj = _json.load(open(_os.path.join("config", "aggregator_presets.json"), encoding="utf-8-sig"))
+            _p = dict(_pj.get("LIVERMORE_PIVOTS", {}))
+            # B14 Part 4 (W9): NS_BRAIN_PIVOTS holds settings for THIS engine's 4H brain only -- the aggregator's own
+            # 4H/1H brains and the charts keep reading LIVERMORE_PIVOTS -- and an entry there replaces that market's
+            # values here. Without the block, nothing changes.
+            _nb = _pj.get("NS_BRAIN_PIVOTS")
+            _lg = logging.getLogger(__name__)
+            if _nb is not None and not isinstance(_nb, dict):
+                _lg.warning("[NS-BRAIN] NS_BRAIN_PIVOTS in config/aggregator_presets.json is not a block of markets -- "
+                            "ignored (every market keeps LIVERMORE_PIVOTS)")
+            for _k, _v in (_nb.items() if isinstance(_nb, dict) else ()):
+                if not isinstance(_v, dict):
+                    _lg.warning("[NS-BRAIN] NS_BRAIN_PIVOTS %s is not a block of settings -- ignored (it keeps "
+                                "LIVERMORE_PIVOTS)", _k)
+                    continue
+                # B14 Part 4 (review): each value is checked -- a quoted number used to pass straight through and make
+                # every brain update fail silently (the brain froze); now it is read as a number, and anything that
+                # isn't a usable number is left out with a warning (that setting stays as LIVERMORE_PIVOTS has it)
+                _ok = {}
+                for _s, _x in _v.items():
+                    if str(_s).startswith("_"):
+                        _ok[_s] = _x                            # a note: kept as written (the brain never reads it)
+                        continue
+                    if _s not in _BRAIN_KEYS:
+                        _lg.warning("[NS-BRAIN] NS_BRAIN_PIVOTS %s: '%s' is not a brain setting -- ignored", _k, _s)
+                        continue
+                    _n = _brain_num(_s, _x)
+                    if _n is None:
+                        _lg.warning("[NS-BRAIN] NS_BRAIN_PIVOTS %s: %s = %r is not a usable number -- ignored (it stays as "
+                                    "LIVERMORE_PIVOTS has it)", _k, _s, _x)
+                        continue
+                    if _n is not _x:
+                        _lg.warning("[NS-BRAIN] NS_BRAIN_PIVOTS %s: %s = %r (in quotes) is read as the number %s", _k, _s, _x, _n)
+                    _ok[_s] = _n
+                _p[_k] = dict(_p.get(_k) or {}, **_ok)
             _LSM_CACHE["m"], _LSM_CACHE["p"] = _m, _p
         except Exception as _e:
             logging.getLogger(__name__).warning("[NS-BRAIN] the brain module could not be loaded -- brain checks see no levels: %s", _e)

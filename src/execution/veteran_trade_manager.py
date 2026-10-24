@@ -14,8 +14,73 @@ import pandas as pd
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
 from enum import Enum
+import weakref as _b14p4_weakref   # B14 Part 4 (Desire 23 Oct): the hands-off rule's suggestion numbers
+import os as _b14p4_os
+import glob as _b14p4_glob
+import json as _b14p4_json
 
 logger = logging.getLogger(__name__)
+
+# B14 Part 4 (Desire 23 Oct): suggestion numbers are unique across all trades AND across restarts -- /approve_N finds
+# the trade by its number, and an old message in the chat must never approve a new suggestion. The counter is kept
+# in data/vtm_suggestion_seq.txt; at start it also takes the highest number in the suggestion ledger and, as trades
+# come back, the open suggestions they carry (every trade manager that has handed control to Desire is listed here).
+_B14P4_SEQ_FILE = _b14p4_os.path.join("data", "vtm_suggestion_seq.txt")
+_B14P4_SUGG_SEQ = [0]
+_B14P4_SEQ_LOCK = threading.Lock()
+_B14P4_HANDS_OFF = _b14p4_weakref.WeakSet()
+
+
+def _b14p4_seed_seq() -> int:
+    top = 0
+    try:
+        with open(_B14P4_SEQ_FILE, encoding="ascii") as _f:
+            top = int((_f.read() or "0").strip())
+    except Exception:
+        pass
+    try:
+        for _p in _b14p4_glob.glob(_b14p4_os.path.join("logs", "vtm_suggestions", "suggestions_*.jsonl")):
+            with open(_p, encoding="utf-8", errors="replace") as _f:
+                for _ln in _f:
+                    try:
+                        top = max(top, int(_b14p4_json.loads(_ln).get("suggestion_id", 0)))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return top
+
+
+_B14P4_SUGG_SEQ[0] = _b14p4_seed_seq()
+
+
+def _b14p4_next_suggestion_id() -> int:
+    with _B14P4_SEQ_LOCK:          # the trade loop and the market watcher can ask at the same moment
+        top = _B14P4_SUGG_SEQ[0]
+        try:
+            _all = list(_B14P4_HANDS_OFF)
+        except RuntimeError:       # another thread added one while copying: the counter alone is enough this once
+            _all = []
+        for _tm in _all:
+            for _rec in list((getattr(_tm, "_sugg", None) or {}).values()):
+                try:
+                    top = max(top, int(_rec.get("id", 0)))
+                except Exception:
+                    pass
+        _B14P4_SUGG_SEQ[0] = top + 1
+        return top + 1
+
+
+def _b14p4_save_seq() -> None:
+    """Outside every lock (from _flush_suggestions): the counter survives a restart."""
+    try:
+        _b14p4_os.makedirs(_b14p4_os.path.dirname(_B14P4_SEQ_FILE), exist_ok=True)
+        _tmp = "%s.%d.tmp" % (_B14P4_SEQ_FILE, threading.get_ident())
+        with open(_tmp, "w", encoding="ascii") as _f:
+            _f.write(str(_B14P4_SUGG_SEQ[0]))
+        _b14p4_os.replace(_tmp, _B14P4_SEQ_FILE)
+    except Exception as _e:
+        logger.warning("[VTM-HANDS-OFF] could not save the suggestion counter: %s", _e)
 
 
 class ExitReason(Enum):
@@ -874,6 +939,8 @@ class VeteranTradeManager:
         # B14: an RLock, as at construction (line ~776). _propose_stop re-enters the lock from inside the tick that
         # already holds it; with a plain Lock a restored position's first stop move would deadlock the trade loop.
         self._sl_lock = threading.RLock()
+        if getattr(self, "_hands_off", None) or getattr(self, "_sugg", None):
+            _B14P4_HANDS_OFF.add(self)   # B14 Part 4 (Desire 23 Oct): its suggestion numbers still count after a restart
 
     # ── S6.3: Lot geometry helpers (mirror the Lot Sanitizer at _calculate_initial_levels) ──
     def _lot_geom(self):
@@ -1059,6 +1126,12 @@ class VeteranTradeManager:
                         distance_from_low = (current_price - latest_low) / candle_range
                         candle_conviction = distance_from_low < 0.20
 
+            if (volume_strong or candle_conviction) and self.hands_off_on():
+                # B14 Part 4 (Desire 23 Oct): Desire's targets stay -- the promotion is a suggestion (sent at the tick's end)
+                with self._sl_lock:
+                    self._suggest("TPSET", list(self.take_profit_levels), [], "promotion_to_runner", sizes=[],
+                                  flags={"runner_activated": True})
+                return False
             if volume_strong or candle_conviction:
                 logger.info("\n" + "=" * 70 + "\n🚀 TRADE PROMOTION TRIGGERED\n" + "=" * 70)
                 self.runner_activated = True
@@ -1326,9 +1399,13 @@ class VeteranTradeManager:
                                                ladder=getattr(self, "ns_b14n_ladder_def", None))
             _new, _why = B14.ladder_stop(self.ns_b14n_st, _d, float(self.entry_price), float(price), float(self.current_stop_loss))
             if _new is not None:
-                logger.info("[NS-LADDER] %s: %s -> stop %.5g (price %.5g, best %.5g, %+.2fR reached)", self.asset, _why, _new,
-                            float(price), float(self.ns_b14n_st["best"]),
-                            _d * (float(self.ns_b14n_st["best"]) - float(self.entry_price)) / max(float(self.ns_b14n_st["risk0"]), 1e-12))
+                # B14 Part 4 (Desire 23 Oct): on a hands-off trade the stop doesn't move, so the ladder asks again every
+                # tick -- its line is written once per step, not every tick
+                if not (self.hands_off_on() and getattr(self, "_b14p4_ladder_said", None) == (_why, float(_new))):
+                    self._b14p4_ladder_said = (_why, float(_new))
+                    logger.info("[NS-LADDER] %s: %s -> stop %.5g (price %.5g, best %.5g, %+.2fR reached)", self.asset, _why, _new,
+                                float(price), float(self.ns_b14n_st["best"]),
+                                _d * (float(self.ns_b14n_st["best"]) - float(self.entry_price)) / max(float(self.ns_b14n_st["risk0"]), 1e-12))
                 self._propose_stop(float(_new), _why)
         except Exception as _le:
             import time as _t14n
@@ -2366,7 +2443,15 @@ class VeteranTradeManager:
                                 if _r > _cur_r + 1e-9 and _r <= _cap + 0.05:
                                     _next = float(_lvl)
                                     break
-                            if _next is not None:
+                            if _next is not None and self.hands_off_on():
+                                # B14 Part 4 (Desire 23 Oct): the roll only fires once price has reached the target,
+                                # too late to ask Desire -- on a trade he has taken over, his target stands (said once)
+                                if getattr(self, "_b14p4_roll_said", None) != (_cur, _next):
+                                    self._b14p4_roll_said = (_cur, _next)
+                                    logger.info("[VTM-HANDS-OFF] %s %s: the roll would move the target %.5f -> %.5f; "
+                                                "hands-off keeps his target (price is at it already: no time to ask)",
+                                                self.asset, self.side.upper(), _cur, _next)
+                            elif _next is not None:
                                 _msg = self.override_take_profit(
                                     _next, target_index=0,
                                     reason="rolling_target", source="AUTO",
@@ -2696,7 +2781,11 @@ class VeteranTradeManager:
                 if _next is not None and self.take_profit_levels:
                     _cur_tp = self.take_profit_levels[-1]
                     # Only ADVANCE the target in the trade's favour, never pull it in.
-                    if self.side == "long" and _next > _cur_tp:
+                    if (((self.side == "long" and _next > _cur_tp) or (self.side == "short" and _next < _cur_tp))
+                            and self.hands_off_on()):
+                        # B14 Part 4 (Desire 23 Oct): Desire's target stays -- the advance is a suggestion
+                        self._suggest("TP@%d" % (len(self.take_profit_levels) - 1), _cur_tp, _next, "zone_tp_advance")
+                    elif self.side == "long" and _next > _cur_tp:
                         self.take_profit_levels[-1] = _next
                         self._queue_pending_move("TP", _cur_tp, _next, "zone_tp_advance")
                         logger.info(f"[VTM] {self.asset}: price cleared zone — TP advanced to {_next:.5f}")
@@ -3059,10 +3148,27 @@ class VeteranTradeManager:
         return None
 
     def _safe_send_alert(self, message: str) -> None:
-        """Brain Rebuild Part 3.5. Best-effort — never raises into the tick loop."""
-        if not self.telegram or not getattr(self.telegram, "is_running", False):
-            return
+        """Brain Rebuild Part 3.5. Best-effort — never raises into the tick loop.
+        B14 Part 4 (Desire 23 Oct): handed to Telegram's own loop (post) -- it never waits now (a failing send held
+        this thread for about 65 s), it goes as plain text (a reason such as b14_ladder1 broke Markdown, and none of
+        the alerts sent here uses formatting), and if Telegram is not up yet it is kept and sent once it is (it
+        used to be dropped without a word). The old way stays only for a Telegram object without post()."""
+        if not self.telegram:
+            # B14 Part 4 (Desire 23 Oct): a trade reloaded after a restart comes back without its Telegram link
+            # (__setstate__ sets it to None and nothing put it back), so its alerts were dropped without a word.
+            # The portfolio manager is re-attached at the reload (B8-11) and holds the same Telegram bot.
+            _tg = getattr(getattr(self, "portfolio_manager", None), "telegram_bot", None)
+            if not _tg:
+                return
+            self.telegram = _tg
+            logger.info("[VTM] %s: Telegram link restored (the trade was reloaded after a restart)", self.asset)
         try:
+            _post = getattr(self.telegram, "post", None)
+            if callable(_post):
+                _post(self.telegram.send_notification(message, parse_mode=None), label=str(message)[:60])
+                return
+            if not getattr(self.telegram, "is_running", False):
+                return
             import asyncio
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -3823,7 +3929,12 @@ class VeteranTradeManager:
         # re-executing every bar, avoiding log spam and repeated partial_sizes mutation.
         if not getattr(self, "_greed_mode_activated", False):
             if adx_value > 40 and atr_value > (1.5 * atr_slow):
-                if len(self.take_profit_levels) > 1:
+                if len(self.take_profit_levels) > 1 and self.hands_off_on():
+                    # B14 Part 4 (Desire 23 Oct): Desire's targets stay -- greed mode is a suggestion
+                    self._suggest("TPSET", list(self.take_profit_levels),
+                                  [self.take_profit_levels[0], self.take_profit_levels[-1]], "greed_mode_collapse",
+                                  sizes=[0.30, 0.70], flags={"_greed_mode_activated": True})
+                elif len(self.take_profit_levels) > 1:
                     # Keep TP1 as a 30% partial lock — it gives certainty while the
                     # runner chases the full move.  Only TP2+ collapse into the runner.
                     logger.info(
@@ -3943,8 +4054,10 @@ class VeteranTradeManager:
                         self.asset, _trigger,
                     )
                     _old_tps = list(self.take_profit_levels)
-                    self.cancel_take_profit()
-                    self._queue_pending_move("TP", _old_tps, [], "reversion_to_trend_mutation_cancel_tp")
+                    _ho_tps = self.hands_off_on()    # B14 Part 4 (Desire 23 Oct): Desire's targets stay; suggested below
+                    if not _ho_tps:
+                        self.cancel_take_profit()
+                        self._queue_pending_move("TP", _old_tps, [], "reversion_to_trend_mutation_cancel_tp")
                     self.trade_type = "TREND"
                     self.enable_trailing_stop()
 
@@ -3975,8 +4088,13 @@ class VeteranTradeManager:
                             # Tighten-only still applies here -- this is a
                             # management move, not the initial stop.
                             self._propose_stop(_mut_sl, "mutation_refinalize")
-                            self.take_profit_levels = [_mut_tp]
+                            if _ho_tps:
+                                self._suggest("TPSET", _old_tps, [_mut_tp], "mutation_new_target", sizes=[])
+                            else:
+                                self.take_profit_levels = [_mut_tp]
                         else:
+                            if _ho_tps:
+                                self._suggest("TPSET", _old_tps, [], "reversion_to_trend_mutation_cancel_tp", sizes=[])
                             # Refusal on an ALREADY-OPEN position means "keep
                             # what you had", never "undo the mutation" -- the
                             # position stays TREND/trailing-enabled with its
@@ -4350,16 +4468,16 @@ class VeteranTradeManager:
             # semantics with zero recording — a full revert of this batch's
             # SL behavior via one config edit, no redeploy.
             if not self.risk_config.get("phase_config", {}).get("auto_move_guard_enabled", True):
+                if self.hands_off_on():      # B14 Part 4 (Desire 23 Oct): a suggestion, not a move
+                    with self._sl_lock:
+                        self._suggest("SL", self.current_stop_loss, float(candidate), reason)
+                    return False
                 self.sl_path.append((datetime.utcnow().isoformat(), self.current_stop_loss, float(candidate), reason))
                 self.sl_path = self.sl_path[-200:]
                 self.current_stop_loss = candidate
                 return True
-            if getattr(self, "_auto_sl_paused", False):
-                logger.info(
-                    f"[VTM] ⏸️ {reason}: auto-SL paused by user for {self.asset} — proposal "
-                    f"{candidate:.5f} suppressed (/resume_sl to re-enable)"
-                )
-                return False
+            # B14 Part 4 (Desire 23 Oct): the /reverse pause is now part of hands-off (hands_off_on): the proposal goes
+            # through the usual checks below and, if the bot would have made it, becomes a suggestion instead.
 
             # ── STOP-2 SEG I: pause the arithmetic stop-movers ──────────────
             # 33 call sites route through this method. Eleven move the stop to
@@ -4424,6 +4542,9 @@ class VeteranTradeManager:
                         f"{cur if cur is None else f'{cur:.5f}'} for {self.asset} {self.side} — suppressed (tighten-only)"
                     )
                     return False
+                if self.hands_off_on():      # B14 Part 4 (Desire 23 Oct): a suggestion, not a move
+                    self._suggest("SL", cur, float(candidate), reason)
+                    return False
                 self.sl_path.append((datetime.utcnow().isoformat(), cur, float(candidate), reason))
                 self.sl_path = self.sl_path[-200:]
                 self.current_stop_loss = candidate
@@ -4451,11 +4572,11 @@ class VeteranTradeManager:
         self._sl_lock:` block has exited. Records each queued move (JSONL +
         notification) with real I/O, now safely outside the lock."""
         pending = getattr(self, "_pending_moves", [])
-        if not pending:
-            return
-        self._pending_moves = []
-        for p in pending:
-            self._record_auto_move(p["kind"], p["old"], p["new"], p["reason"], source=p["source"])
+        if pending:
+            self._pending_moves = []
+            for p in pending:
+                self._record_auto_move(p["kind"], p["old"], p["new"], p["reason"], source=p["source"])
+        self._flush_suggestions()      # B14 Part 4 (Desire 23 Oct): the hands-off suggestions queued in the tick
 
     def _record_auto_move(self, kind: str, old, new, reason: str, source: str = "AUTO") -> None:
         """Append to the in-memory ring + daily JSONL + hand to the notifier.
@@ -4552,6 +4673,252 @@ class VeteranTradeManager:
             logger.warning(f"[VTM] notify error: {e}")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # B14 Part 4 (Desire 23 Oct) — HANDS-OFF. Once Desire moves a trade's SL or TP himself (/set_sl, /set_tp,
+    # /reverse), the bot no longer moves that trade's SL or TP on its own: every move it would have made becomes a
+    # suggestion sent to him (one tap: /approve_N), and nothing moves until he approves. It lasts until the trade
+    # closes or /resume_sl. Saved with the trade (the trade manager is pickled with its position), so a restart
+    # keeps it. Covers every automated writer: _propose_stop (ladder, trail, breakevens, the brain's lock/trail,
+    # the market watcher), the target roll, the zone advance, greed mode, the trade-plan change (mutation) and the
+    # circuit breaker's breakeven lock (main.py).
+    # ─────────────────────────────────────────────────────────────────────────
+    def hands_off_on(self) -> bool:
+        """True once Desire has taken this trade's SL/TP over (the old /reverse pause counts too)."""
+        return bool(getattr(self, "_hands_off", None)) or bool(getattr(self, "_auto_sl_paused", False))
+
+    def start_hands_off(self, by: str) -> None:
+        with self._sl_lock:
+            if not getattr(self, "_hands_off", None):
+                self._hands_off = {"by": str(by), "since": datetime.utcnow().isoformat()}
+                logger.info("[VTM-HANDS-OFF] %s %s: hands-off ON (%s) -- the bot suggests SL/TP moves, Desire approves",
+                            self.asset, str(self.side).upper(), by)
+            _B14P4_HANDS_OFF.add(self)
+
+    def end_hands_off(self, why: str = "/resume_sl") -> bool:
+        with self._sl_lock:
+            was = self.hands_off_on()
+            self._hands_off = None
+            self._auto_sl_paused = False
+            self._sugg = {}
+            self._sugg_outbox = []
+        if was:
+            logger.info("[VTM-HANDS-OFF] %s %s: hands-off OFF (%s) -- the bot manages SL and TP again",
+                        self.asset, str(self.side).upper(), why)
+        return was
+
+    def _b14p4_urgent_note(self, event: str) -> None:
+        """A protective move the bot would have made on a hands-off trade, when no new suggestion goes out (Desire's
+        stop, or an open suggestion, is already at least as tight): it is said anyway, plainly (rule 13)."""
+        try:
+            _o = (getattr(self, "_sugg", None) or {}).get("SL")
+            _cur = self.current_stop_loss
+            txt = "⚠️ URGENT: %s on %s %s. Hands-off: your SL %s stays." % (
+                event, self.asset, str(self.side).upper(), ("%.5f" % float(_cur)) if _cur is not None else "-")
+            if _o is not None:
+                txt += "\nOpen suggestion #%d: SL → %.5f (%s). Approve: /approve_%d" % (
+                    _o["id"], float(_o["new"]), _o["reason"], _o["id"])
+            self._safe_send_alert(txt)
+        except Exception as e:
+            logger.warning(f"[VTM-HANDS-OFF] urgent note failed: {e}")
+
+    def _b14p4_step(self) -> float:
+        """The smallest change worth a suggestion message: hands_off_step_atr x ATR (default 0.25, the trail digest's
+        step); 0.1% of the entry price while the ATR is not known yet."""
+        try:
+            pc = (self.risk_config or {}).get("phase_config", {}) or {}
+            k = float(pc.get("hands_off_step_atr", pc.get("auto_move_trail_digest_atr", 0.25)))
+        except Exception:
+            k = 0.25
+        try:
+            atr = abs(float(getattr(self, "_last_atr", 0.0) or 0.0))
+        except Exception:
+            atr = 0.0
+        if not atr > 0:
+            return 0.001 * abs(float(self.entry_price or 0.0))
+        return k * atr
+
+    def _suggest(self, key: str, old, new, reason: str, sizes=None, flags=None):
+        """A move the bot would have made, kept as a suggestion. In memory only (it runs inside the tick, under
+        _sl_lock); _flush_suggestions sends it. One open suggestion per key: "SL", "TP@<index>" (one target),
+        "TPSET" (the whole target list). A new one replaces the open one only when it is worth a message: a stop
+        at least one step tighter than both the current stop and the open suggestion (never a looser stop); a
+        target at least one step from the current one and one step FURTHER in the trade's favour than the open
+        suggestion (so a level that wobbles doesn't message every look); a target-list change with a new reason.
+        Returns the new suggestion, or None when none was made."""
+        try:
+            sugg = getattr(self, "_sugg", None)
+            if sugg is None:
+                sugg = self._sugg = {}
+            step = self._b14p4_step()
+            openr = sugg.get(key)
+            if key == "SL":
+                new = float(new)
+                if old is not None:
+                    old = float(old)
+                    if not self._is_tighter(new, old) or abs(new - old) < step:
+                        return None
+                if openr is not None:
+                    _o = float(openr["new"])
+                    if not (self._is_tighter(new, _o) and abs(new - _o) >= step):
+                        return None
+            elif key.startswith("TP@"):
+                new = float(new)
+                if old is not None:
+                    old = float(old)
+                    if abs(new - old) < step:
+                        return None
+                if openr is not None:
+                    _o = float(openr["new"])
+                    _further = (new > _o) if self.side == "long" else (new < _o)
+                    if not (_further and abs(new - _o) >= max(step, 1e-12)):
+                        return None
+            else:
+                if openr is not None and openr.get("reason") == reason:
+                    return None
+            rec = {"id": _b14p4_next_suggestion_id(), "key": key, "old": old, "new": new, "reason": str(reason),
+                   "ts": datetime.utcnow().isoformat(), "sizes": sizes, "flags": dict(flags or {})}
+            sugg[key] = rec
+            _B14P4_HANDS_OFF.add(self)
+            out = getattr(self, "_sugg_outbox", None)
+            if out is None:
+                out = self._sugg_outbox = []
+            out.append(rec)
+            logger.info("[VTM-HANDS-OFF] %s %s: suggestion #%d %s %s -> %s (%s) -- not moved, waiting for Desire",
+                        self.asset, str(self.side).upper(), rec["id"], key, old, new, reason)
+            return rec
+        except Exception as e:
+            logger.warning(f"[VTM-HANDS-OFF] suggestion error ({reason}): {e}")
+            return None
+
+    def _suggestion_text(self, rec) -> str:
+        key, rsn = rec["key"], rec["reason"]
+        urgent = ("emergency" in rsn) or ("circuit_breaker" in rsn)
+
+        def _f(x):
+            try:
+                return "%.5f" % float(x)
+            except Exception:
+                return str(x)
+
+        head = ("⚠️ URGENT suggestion" if urgent else "\U0001F4A1 Suggestion") + " #%d %s %s: " % (
+            rec["id"], self.asset, str(self.side).upper())
+        if key == "SL":
+            what, keep = "SL %s → %s  (%s)" % (_f(rec["old"]), _f(rec["new"]), rsn), "your SL"
+        elif key.startswith("TP@"):
+            what, keep = "TP%d %s → %s  (%s)" % (int(key[3:]) + 1, _f(rec["old"]), _f(rec["new"]), rsn), "your TP"
+        else:
+            new = list(rec["new"] or [])
+            if rsn == "greed_mode_collapse":
+                what = ("greed mode -- keep TP1 for 30%%, drop the middle targets, run the other 70%% to %s  (%s)"
+                        % (_f(new[-1]) if new else "-", rsn))
+            elif rsn == "promotion_to_runner":
+                what = "promote it to a runner -- cancel your targets and let the trailing stop run it  (%s)" % rsn
+            elif not new:
+                what = "the trade turned into a trend -- cancel your targets and let the trailing stop run it  (%s)" % rsn
+            else:
+                what = "the trade turned into a trend -- one target at %s instead of yours  (%s)" % (_f(new[0]), rsn)
+            keep = "your targets"
+        return head + what + "\nApprove: /approve_%d  ·  ignore it to keep %s" % (rec["id"], keep)
+
+    def _flush_suggestions(self) -> None:
+        """Send the suggestions queued in the tick, outside the lock: a ledger line, then the message."""
+        with self._sl_lock:           # the tick and the market watcher can both flush: take the list once
+            out = getattr(self, "_sugg_outbox", None)
+            if not out:
+                return
+            self._sugg_outbox = []
+        sent = 0
+        for rec in out:
+            try:
+                if (getattr(self, "_sugg", None) or {}).get(rec["key"]) is not rec:
+                    continue          # replaced in the same tick (or approved/dropped): only the newest goes out
+                self._ledger_suggestion(rec)
+                self._safe_send_alert(self._suggestion_text(rec))
+                sent += 1
+            except Exception as e:
+                logger.warning(f"[VTM-HANDS-OFF] sending a suggestion failed: {e}")
+        if sent:
+            _b14p4_save_seq()         # the numbers given out so far, kept for after a restart
+
+    def _ledger_suggestion(self, rec) -> None:
+        """One line per suggestion in logs/vtm_suggestions/ (a folder of its own: main.py reads the move ledger)."""
+        try:
+            import json as _json_sg, os as _os_sg, time as _time_sg
+            _os_sg.makedirs("logs/vtm_suggestions", exist_ok=True)
+            _path = f"logs/vtm_suggestions/suggestions_{_time_sg.strftime('%Y-%m-%d')}.jsonl"
+            if (getattr(self, "signal_details", None) or {}).get("_presend_probe"):
+                _path = _os_sg.devnull
+            _line = {"suggestion_id": rec["id"], "ts": _time_sg.strftime("%Y-%m-%dT%H:%M:%S"), "asset": self.asset,
+                     "side": self.side, "kind": rec["key"], "old": rec["old"], "new": rec["new"],
+                     "reason": rec["reason"], "source": "SUGGEST", "entry": self.entry_price,
+                     "episode_id": getattr(self, "episode_id", None)}
+            with open(_path, "a") as f:
+                f.write(_json_sg.dumps(_line, default=str) + "\n")
+        except Exception as e:
+            logger.warning(f"[VTM-HANDS-OFF] suggestion ledger line failed: {e}")
+
+    def open_suggestions(self) -> list:
+        return [dict(r, text=self._suggestion_text(r)) for r in list((getattr(self, "_sugg", None) or {}).values())]
+
+    def _drop_suggestions(self, prefix: str) -> None:
+        """Desire set that level himself: the open suggestions for it are out of date."""
+        with self._sl_lock:
+            sugg = getattr(self, "_sugg", None)
+            if sugg:
+                for k in [k for k in list(sugg) if k.startswith(prefix)]:
+                    sugg.pop(k, None)
+
+    def approve_suggestion(self, sid: int):
+        """Desire approved suggestion #sid: apply it the way his own commands do (same checks, recorded as his).
+        Returns (ok, text, push): push is "SL" or "TP" when the new level should go to the exchange now."""
+        sugg = getattr(self, "_sugg", None) or {}
+        rec = next((r for r in list(sugg.values()) if int(r.get("id", -1)) == int(sid)), None)
+        if rec is None:
+            return False, "ℹ️ Suggestion #%d is not open any more." % int(sid), None
+        key, why = rec["key"], "approved_suggestion_%d" % int(rec["id"])
+        tol = 1e-9 * max(1.0, abs(float(self.entry_price or 1.0)))
+
+        def _same(a, b):
+            try:
+                return abs(float(a) - float(b)) <= tol
+            except Exception:
+                return a == b
+
+        if key == "SL":
+            if rec["old"] is not None and not _same(self.current_stop_loss, rec["old"]):
+                self._drop_suggestions("SL")
+                return False, ("ℹ️ Not applied: the SL changed since suggestion #%d (it is %s now)."
+                               % (rec["id"], self.current_stop_loss)), None
+            res = self.override_stop_loss(float(rec["new"]), reason=why)
+            return ("✅" in res), res, ("SL" if "✅" in res else None)
+        if key.startswith("TP@"):
+            idx = int(key[3:])
+            levels = list(self.take_profit_levels)
+            if idx in self.partials_hit or idx >= len(levels) or not _same(levels[idx], rec["old"]):
+                self._drop_suggestions(key)
+                return False, ("ℹ️ Not applied: that target changed or was reached since suggestion #%d."
+                               % rec["id"]), None
+            remaining = [i for i in range(len(levels)) if i not in self.partials_hit]
+            res = self.override_take_profit(float(rec["new"]), target_index=remaining.index(idx), reason=why,
+                                            source="MANUAL")
+            return ("✅" in res), res, ("TP" if "✅" in res else None)
+        if list(self.take_profit_levels) != list(rec["old"] or []):
+            self._drop_suggestions("TP")
+            return False, "ℹ️ Not applied: the targets changed since suggestion #%d." % rec["id"], None
+        with self._sl_lock:
+            _old = list(self.take_profit_levels)
+            self.take_profit_levels = list(rec["new"] or [])
+            if rec.get("sizes") is not None:
+                self.partial_sizes = list(rec["sizes"])
+            for _k, _v in (rec.get("flags") or {}).items():
+                setattr(self, _k, _v)
+        self._record_auto_move("TP", _old, list(self.take_profit_levels), why, source="MANUAL")
+        self._drop_suggestions("TP")
+        logger.info("[VTM-HANDS-OFF] %s %s: suggestion #%d approved -- targets %s -> %s",
+                    self.asset, str(self.side).upper(), rec["id"], _old, list(self.take_profit_levels))
+        return True, ("✅ Targets updated (suggestion #%d)\n  Asset : %s %s\n  Old   : %s\n  New   : %s"
+                      % (rec["id"], self.asset, str(self.side).upper(), _old, list(self.take_profit_levels))), "TP"
+
+    # ─────────────────────────────────────────────────────────────────────────
     # T3.2 — Manual Override Methods (Telegram /set_sl /set_tp /vtm_status)
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -4595,7 +4962,7 @@ class VeteranTradeManager:
             logger.error("[SL-TP-SANITY] check errored: %s", e)
             return True, 0.0, ""          # never block on our own bug
 
-    def override_stop_loss(self, new_sl: float) -> str:
+    def override_stop_loss(self, new_sl: float, reason: str = "manual_set_sl") -> str:
         """
         Manually override the current stop loss level via Telegram command.
 
@@ -4659,10 +5026,11 @@ class VeteranTradeManager:
         # market_watcher/check_exit pair.
         with self._sl_lock:
             old_sl = self.current_stop_loss
-            self.sl_path.append((datetime.utcnow().isoformat(), old_sl, float(new_sl), "manual_set_sl"))  # DIARY-1 D2
+            self.sl_path.append((datetime.utcnow().isoformat(), old_sl, float(new_sl), reason))  # DIARY-1 D2 (B14 Part 4: reason)
             self.sl_path = self.sl_path[-200:]
             self.current_stop_loss = new_sl
-        self._record_auto_move("SL", old_sl, new_sl, "manual_set_sl", source="MANUAL")
+        self._record_auto_move("SL", old_sl, new_sl, reason, source="MANUAL")
+        self._drop_suggestions("SL")   # B14 Part 4 (Desire 23 Oct): a suggestion made from the old SL is out of date
         logger.info(
             f"[VTM] 🖊️ Manual SL override: {self.asset} {self.side.upper()} "
             f"SL {old_sl:.5f} → {new_sl:.5f} dist={_dist:.1f}atr"
@@ -4764,6 +5132,8 @@ class VeteranTradeManager:
         if not remaining_indices:
             self.take_profit_levels = [new_tp]
             self._record_auto_move("TP", None, new_tp, reason, source=source)
+            if source == "MANUAL":
+                self._drop_suggestions("TP")   # B14 Part 4 (Desire 23 Oct): suggestions made from the old targets are out of date
             logger.info(
                 f"[VTM] 🖊️ Manual TP added (was empty): {self.asset} {self.side.upper()} "
                 f"→ {new_tp:.5f} dist={_tp_dist:.1f}atr"
@@ -4780,6 +5150,8 @@ class VeteranTradeManager:
         old_tp = self.take_profit_levels[actual_idx]
         self.take_profit_levels[actual_idx] = new_tp
         self._record_auto_move("TP", old_tp, new_tp, reason, source=source)
+        if source == "MANUAL":
+            self._drop_suggestions("TP")   # B14 Part 4 (Desire 23 Oct): suggestions made from the old targets are out of date
 
         logger.info(
             f"[VTM] 🖊️ Manual TP override: {self.asset} {self.side.upper()} "

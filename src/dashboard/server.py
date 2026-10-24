@@ -1489,6 +1489,13 @@ def bot_pid():
         with open(pid_path) as f:
             pid = int(f.read().strip())
         running = psutil.pid_exists(pid)
+        if running:
+            # B14 Part 4 (item 15): Windows reuses process numbers -- after a crash the number left in bot.pid can belong
+            # to any other program. Only a python running main.py counts as the bot.
+            try:
+                running = "main.py" in " ".join(psutil.Process(pid).cmdline() or [])
+            except Exception:
+                running = False
         return jsonify({"running": running, "pid": pid})
     except ImportError:
         # psutil not available — just report the PID file exists
@@ -2003,7 +2010,9 @@ if __name__ == "__main__":
 
     # Run server
     app.run(
-        host="0.0.0.0",  # Allow external connections
+        # B14 Part 4 (Desire 23 Oct, "lock it"): inside the box only. Caddy (the https address, with its password) and
+        # the bot's own health check both connect from the box itself; nothing outside reaches port 5000 directly.
+        host="127.0.0.1",
         port=5000,
         debug=False,
         threaded=True,

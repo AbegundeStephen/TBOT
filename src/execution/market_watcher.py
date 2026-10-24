@@ -604,15 +604,17 @@ class MarketWatcher:
         )
 
         # Push SL to breakeven on the exchange
-        self._push_sl(position, be_sl, asset_name, reason="market_watcher_breakeven")
+        _pushed, _note = self._push_sl(position, be_sl, asset_name, reason="market_watcher_breakeven")
 
-        # Telegram alert
+        # Telegram alert (B14 Part 4, Desire 23 Oct: it says what really happened -- it said "tightened" even when the
+        # stop was not moved)
         self._send_alert(
             f"⚠️ <b>MARKET WATCHER</b>\n"
             f"{asset_name} {position.side.upper()} adverse move: "
             f"<b>{adverse:.4g}</b> ({adverse/atr:.1f}× ATR)\n"
-            f"Tightened SL → breakeven <b>${be_sl:.4g}</b>\n"
-            f"Entry: ${position.entry_price:.4g} | Now: ${current_price:.4g}"
+            + (f"Tightened SL → breakeven <b>${be_sl:.4g}</b>\n" if _pushed
+               else f"SL <b>NOT</b> moved to breakeven ${be_sl:.4g}: {_note}\n")
+            + f"Entry: ${position.entry_price:.4g} | Now: ${current_price:.4g}"
         )
 
     def _handle_extreme_adverse(
@@ -643,14 +645,15 @@ class MarketWatcher:
             f"Pushing emergency SL → ${emergency_sl:.4g}"
         )
 
-        self._push_sl(position, emergency_sl, asset_name, reason="market_watcher_emergency")
+        _pushed, _note = self._push_sl(position, emergency_sl, asset_name, reason="market_watcher_emergency")
 
         self._send_alert(
             f"🚨 <b>MARKET WATCHER — EMERGENCY</b>\n"
             f"{asset_name} {position.side.upper()} <b>EXTREME</b> adverse move!\n"
             f"Move: <b>{adverse:.4g}</b> ({adverse/atr:.1f}× ATR)\n"
-            f"Emergency SL pushed → <b>${emergency_sl:.4g}</b>\n"
-            f"Entry: ${position.entry_price:.4g} | Now: ${current_price:.4g}\n"
+            + (f"Emergency SL pushed → <b>${emergency_sl:.4g}</b>\n" if _pushed
+               else f"Emergency SL ${emergency_sl:.4g} <b>NOT</b> pushed: {_note}\n")
+            + f"Entry: ${position.entry_price:.4g} | Now: ${current_price:.4g}\n"
             f"⚠️ Consider closing manually if market continues against you."
         )
 
@@ -667,11 +670,14 @@ class MarketWatcher:
         Checked BEFORE the exchange call so a rejected proposal never
         reaches the broker either — the exchange-level stop is the one that
         actually matters for risk, more so than the local VTM mirror.
+
+        B14 Part 4 (Desire 23 Oct): returns (pushed, note) -- pushed is True only when the new stop went to MT5; the
+        note says why not, for the alert (the alerts said "tightened"/"pushed" even when nothing moved).
         """
         if not position.mt5_ticket:
-            return
+            return False, "not an MT5 trade"
         if not self.mt5_handler:
-            return
+            return False, "MT5 is not connected to the watcher"
         tm = position.trade_manager
         if tm is not None and hasattr(tm, "_is_tighter"):
             with tm._sl_lock:
@@ -683,11 +689,33 @@ class MarketWatcher:
                     f"{_cur if _cur is None else f'{_cur:.5g}'} for {asset_name} — "
                     f"suppressed (tighten-only), not pushed to exchange"
                 )
-                return
+                return False, "the stop is already tighter"
+        # B14 Part 4 (Desire 23 Oct): a trade Desire has taken over (/set_sl, /set_tp, /reverse) is not moved here:
+        # the move becomes a suggestion he approves. It used to be pushed to MT5 first, even after /reverse's pause.
+        # The suggestion is made directly (not through _propose_stop): the B14 engine's stop hold would drop the
+        # watcher's move there without a word.
+        if tm is not None and callable(getattr(tm, "hands_off_on", None)) and tm.hands_off_on():
+            _rec = None
+            try:
+                with tm._sl_lock:
+                    _rec = tm._suggest("SL", tm.current_stop_loss, float(new_sl), reason)
+                if hasattr(tm, "_flush_pending_moves"):
+                    tm._flush_pending_moves()
+            except Exception as exc:
+                logger.error(f"[WATCHER] hands-off suggestion failed for {asset_name}: {exc}")
+            if _rec:
+                logger.info(f"[WATCHER] {reason}: {asset_name} is hands-off -- SL {new_sl:.5g} sent as suggestion "
+                            f"#{_rec['id']}, not pushed to exchange")
+                return False, "hands-off -- sent to you as suggestion #%d (/approve_%d)" % (_rec["id"], _rec["id"])
+            logger.info(f"[WATCHER] {reason}: {asset_name} is hands-off -- SL {new_sl:.5g} not pushed; no new "
+                        f"suggestion (his stop, or an open suggestion, is already as tight)")
+            return False, "hands-off -- your stop, or an open suggestion (/approve lists it), is already as tight"
         try:
             symbol = self.mt5_handler._resolve_symbol(asset_name)
+            if not symbol:
+                return False, "the MT5 symbol was not found"
             if symbol:
-                self.mt5_handler._push_sl_to_exchange(
+                _ok = self.mt5_handler._push_sl_to_exchange(
                     position.mt5_ticket, symbol, new_sl
                 )
                 logger.info(
@@ -713,8 +741,12 @@ class MarketWatcher:
                             tm.current_stop_loss = new_sl
                     else:
                         tm.current_stop_loss = new_sl
+                if _ok is False:
+                    return False, "the push to MT5 failed (see the VTM-SL log lines)"
+                return True, "pushed"
         except Exception as exc:
             logger.error(f"[WATCHER] SL push failed for {asset_name}: {exc}")
+            return False, "the push failed (%s)" % type(exc).__name__
 
     def _send_alert(self, message: str):
         """Fire a Telegram alert if available."""

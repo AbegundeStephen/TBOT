@@ -1965,7 +1965,7 @@
   },
   "scalp_alerts": {
     "_note": "Personal-use only. Notifies via Telegram when 1H and 4H regime structurally align, with ADX/RSI levels, their rising/falling direction, and a go-in/wait advisory. Off by default.",
-    "enabled": true,
+    "enabled": false,
     "assets": [],
     "min_adx": 20,
     "rsi_overbought": 70,

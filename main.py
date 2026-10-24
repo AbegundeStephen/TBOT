@@ -6154,6 +6154,30 @@ class TradingBot:
                             if _cb_pos.trade_manager and not getattr(
                                 _cb_pos.trade_manager, "_cb_breakeven_locked", False
                             ):
+                                _cbtm = _cb_pos.trade_manager
+                                if callable(getattr(_cbtm, "hands_off_on", None)) and _cbtm.hands_off_on():
+                                    # B14 Part 4 (Desire 23 Oct): a trade Desire has taken over keeps his stop -- the
+                                    # breakeven lock is a suggestion he approves. Not marked as locked: after
+                                    # /resume_sl the next trip locks it as before.
+                                    _cb_rec = None
+                                    try:
+                                        with _cbtm._sl_lock:
+                                            _cb_rec = _cbtm._suggest("SL", _cbtm.current_stop_loss,
+                                                                     float(_cb_pos.entry_price), "circuit_breaker_breakeven")
+                                        _cbtm._flush_pending_moves()
+                                        if _cb_rec is None:
+                                            _cbtm._b14p4_urgent_note("the circuit breaker would lock the stop to "
+                                                                     "breakeven (%.5f)" % float(_cb_pos.entry_price))
+                                    except Exception as _cb_ho_err:
+                                        logger.warning("[VTM CB] %s: hands-off suggestion failed: %s",
+                                                       asset_name, _cb_ho_err)
+                                    logger.warning(
+                                        "[VTM CB] %s pos %s: hands-off -- breakeven @ %.5g %s, stop not moved",
+                                        asset_name, _cb_pos.position_id, _cb_pos.entry_price,
+                                        ("suggested (#%d)" % _cb_rec["id"]) if _cb_rec else
+                                        "not suggested (his stop or an open suggestion is already as tight; told him)",
+                                    )
+                                    continue
                                 _cb_pos.trade_manager.current_stop_loss = _cb_pos.entry_price
                                 _cb_pos.trade_manager._cb_breakeven_locked = True
                                 logger.warning(
@@ -8533,15 +8557,10 @@ class TradingBot:
                         # G4: no invented side for a pre-direction gate with no
                         # intended direction -- record, don't shadow.
                         logger.info(f"[GATE-1] {asset_name} {_gate_id_generic}: no direction — recorded, not shadowed")
-                        if getattr(self, "funnel_logger", None) is not None:
-                            try:
-                                self.funnel_logger.record(
-                                    asset_name, 0,
-                                    {"reasoning": _gate_id_generic, "gate_stage": _gate_stage_generic,
-                                     "episode_id": details.get("episode_id")},
-                                )
-                            except Exception:
-                                pass
+                        # B14 Part 4 (item 12): no second funnel row here. This same look was already written by the
+                        # evaluation record above ("3. Check HOLD" is reached only after it), with the council's own
+                        # reason (e.g. stale_price_31min) -- writing it again doubled every pre-direction block
+                        # (51 of 105 rows, same time stamp). Telemetry only: no trade path reads the funnel.
                     elif original_sig != 0:
                         self._shadow_open_blocked(
                             asset_name, original_sig, details, df, current_price,
@@ -11058,21 +11077,29 @@ class TradingBot:
                             _script  = str(Path(__file__).resolve())
                             _workdir = str(Path(__file__).parent.resolve())
 
-                            # Reverted to structure similar to initial setup but with robust taskkill
+                            # B14 Part 4 (item 20, Desire 23 Oct): end ONLY the bot's own python processes (main.py and
+                            # its dashboard) -- it was `taskkill /F /IM python.exe`, which also ended the Saturday job and
+                            # any test or tool running on the box. Same filter as tools\stop_bot.ps1. The fallback (no
+                            # task found) starts the bot with this bot's own python (the venv), not whatever is on PATH.
+                            _kill_own = (               # a plain string (not an f-string): single braces are PowerShell's
+                                "Get-CimInstance Win32_Process -Filter 'Name=''python.exe''' | Where-Object { "
+                                "$_.CommandLine -like '*main.py*' -or $_.CommandLine -like '*dashboard*server.py*' } | "
+                                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; "
+                            )
                             _ps_cmd = (
                                 f"$t = Get-ScheduledTask -TaskName '{_task_name}' -ErrorAction SilentlyContinue; "
                                 f"if ($t) {{ "
                                 f"  Stop-ScheduledTask -TaskName '{_task_name}' -ErrorAction SilentlyContinue; "
                                 f"  Start-Sleep -Seconds 2; "
-                                f"  taskkill /F /IM python.exe 2>$null; "
+                                f"  {_kill_own}"
                                 f"  Start-Sleep -Seconds 2; "
                                 f"  Start-ScheduledTask -TaskName '{_task_name}' "
                                 f"}} else {{ "
                                 f"  Start-Sleep -Seconds 2; "
-                                f"  taskkill /F /IM python.exe 2>$null; "
+                                f"  {_kill_own}"
                                 f"  Start-Sleep -Seconds 2; "
                                 f"  Set-Location '{_workdir}'; "
-                                f"  cmd.exe /c \"start python main.py\" "
+                                f"  Start-Process -FilePath '{_python}' -ArgumentList 'main.py' -WorkingDirectory '{_workdir}' "
                                 f"}}"
                             )
 
